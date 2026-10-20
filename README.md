@@ -106,6 +106,8 @@ Sin las variables de GitHub, los documentos se guardan en la carpeta `almacen_do
 
 - **Modelo:** por defecto usa `gemini-flash-latest`. Si da error de modelo, cambialo en *Opciones avanzadas* (barra lateral) por uno que figure como gratuito en la página de precios de Gemini.
 - **Fragmentos por consulta:** más fragmentos = más contexto, pero más consumo. Con 8 suele alcanzar.
+- **Modelos de respaldo:** si el modelo principal está saturado (error 503) la app reintenta; si sigue saturado o se quedó sin cupo (error 429), prueba en orden con `gemini-flash-lite-latest`, `gemini-2.5-flash` y `gemini-2.5-flash-lite`. Debajo de la respuesta se indica si respondió un modelo de respaldo. La lista se puede cambiar con el secret `MODELOS_DE_RESPALDO = "modelo1, modelo2"` (los nombres vigentes están en la página de modelos de Gemini).
+- **Error 403 "Your project has been denied access" / proyecto "Restringido":** suele pasar con cuentas institucionales (por ejemplo, `@iudpt.edu.ar`). Creá la clave de Gemini con una cuenta personal de Gmail y reemplazala en los Secrets.
 - **Error de límite (429):** el plan gratuito limita pedidos por minuto y por día. Esperá y reintentá.
 - **Tamaño máximo de archivo:** agregá `TAMANIO_MAXIMO_MB = "80"` (o el número que quieras, hasta 95) en los Secrets. Para documentos más grandes conviene dividirlos (por ejemplo, un PDF por capítulo): además de entrar en el límite, la búsqueda funciona mejor y la app usa menos memoria.
 - **Documentos subidos directo a GitHub:** también podés subir archivos a mano al repositorio privado, dentro de la carpeta del formato correcto. Después tocá **🔄 Actualizar lista** en la app.

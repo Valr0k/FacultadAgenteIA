@@ -25,6 +25,9 @@ from documentos import EXTENSIONES_SOPORTADAS, Buscador, armar_contexto, leer_do
 
 # ---------- Configuración general ----------
 MODELO_POR_DEFECTO = "gemini-flash-latest"   # alias que apunta al Flash vigente
+# Si el modelo principal está saturado o sin cupo, se prueban estos en orden.
+# Se pueden cambiar con el secret MODELOS_DE_RESPALDO (separados por comas).
+MODELOS_DE_RESPALDO_POR_DEFECTO = "gemini-flash-lite-latest, gemini-2.5-flash, gemini-2.5-flash-lite"
 MENSAJES_DE_HISTORIAL = 6                    # turnos previos que recuerda el asistente
 CARPETA = Path(__file__).parent
 RUTA_PROMPT_DOCUMENTOS = CARPETA / "prompt_sistema.txt"
@@ -51,6 +54,13 @@ def obtener_secreto(nombre: str) -> str | None:
         return st.secrets[nombre]
     except Exception:
         return None
+
+
+MODELOS_DE_RESPALDO = [
+    m.strip() for m in
+    (obtener_secreto("MODELOS_DE_RESPALDO") or MODELOS_DE_RESPALDO_POR_DEFECTO).split(",")
+    if m.strip()
+]
 
 
 def credenciales_admin() -> tuple[str | None, str | None]:
@@ -152,13 +162,63 @@ def historial_para_gemini(historial: list[dict]) -> list[types.Content]:
 
 
 def describir_error(error: Exception) -> str:
-    if "429" in str(error) or "RESOURCE_EXHAUSTED" in str(error):
+    texto = str(error)
+    if "429" in texto or "RESOURCE_EXHAUSTED" in texto:
         return "Se alcanzó el límite gratuito de la API. Esperá un minuto y volvé a intentar."
+    if "503" in texto or "UNAVAILABLE" in texto or "overloaded" in texto.lower():
+        return ("Los servidores de Google están saturados en este momento y ningún modelo "
+                "pudo responder. Es temporal: esperá unos segundos y volvé a preguntar.")
+    if "403" in texto or "PERMISSION_DENIED" in texto:
+        return ("Google rechazó la clave de la API (403). Revisá en AI Studio que el proyecto "
+                "no esté «Restringido» o creá una clave nueva (ver README).")
     return f"Ocurrió un error al consultar el modelo: {error}"
 
 
+# Errores pasajeros: conviene esperar un poco y reintentar con el mismo modelo
+ERRORES_TEMPORALES = ("503", "UNAVAILABLE", "500", "INTERNAL", "DEADLINE_EXCEEDED", "overloaded")
+# Errores de un modelo en particular: conviene pasar directo al siguiente modelo
+ERRORES_DEL_MODELO = ("429", "RESOURCE_EXHAUSTED", "404", "NOT_FOUND")
+INTENTOS_POR_MODELO = 2
+ESPERA_ENTRE_INTENTOS = 2   # segundos
+
+
+def lista_de_modelos(principal: str) -> list[str]:
+    """El modelo elegido primero y después los de respaldo, sin repetir."""
+    modelos = []
+    for modelo in [principal] + MODELOS_DE_RESPALDO:
+        modelo = modelo.strip()
+        if modelo and modelo not in modelos:
+            modelos.append(modelo)
+    return modelos
+
+
+def generar_con_respaldo(cliente, modelo_principal: str, contenidos, configuracion):
+    """Llama a Gemini y, si el modelo está saturado o sin cupo, reintenta y
+    prueba con los modelos de respaldo. Devuelve (respuesta, modelo_usado).
+    Los errores que no se arreglan cambiando de modelo (clave inválida,
+    pedido mal armado) se informan enseguida."""
+    ultimo_error = None
+    for modelo in lista_de_modelos(modelo_principal):
+        for intento in range(1, INTENTOS_POR_MODELO + 1):
+            try:
+                respuesta = cliente.models.generate_content(
+                    model=modelo, contents=contenidos, config=configuracion)
+                return respuesta, modelo
+            except Exception as error:
+                ultimo_error = error
+                texto = str(error)
+                if any(codigo in texto for codigo in ERRORES_DEL_MODELO):
+                    break   # este modelo no va a responder: probar el siguiente
+                if not any(codigo in texto for codigo in ERRORES_TEMPORALES):
+                    raise   # otro problema (por ejemplo, la clave): no tiene sentido seguir
+                if intento < INTENTOS_POR_MODELO:
+                    time.sleep(ESPERA_ENTRE_INTENTOS * intento)
+    raise ultimo_error
+
+
 def preguntar_a_documentos(clave: str, modelo: str, historial: list[dict],
-                           pregunta: str, contexto: str, nombres_documentos: list[str]) -> str:
+                           pregunta: str, contexto: str,
+                           nombres_documentos: list[str]) -> tuple[str, str]:
     """Consulta a Gemini SIN herramientas: solo puede usar los fragmentos recibidos."""
     cliente = genai.Client(api_key=clave)
     contenidos = historial_para_gemini(historial)
@@ -172,15 +232,13 @@ def preguntar_a_documentos(clave: str, modelo: str, historial: list[dict],
     )
     contenidos.append(types.Content(role="user", parts=[types.Part(text=mensaje_actual)]))
 
-    respuesta = cliente.models.generate_content(
-        model=modelo,
-        contents=contenidos,
-        config=types.GenerateContentConfig(
-            system_instruction=cargar_prompt(RUTA_PROMPT_DOCUMENTOS),
-            temperature=0.2,   # baja: prioriza precisión sobre creatividad
-        ),
+    configuracion = types.GenerateContentConfig(
+        system_instruction=cargar_prompt(RUTA_PROMPT_DOCUMENTOS),
+        temperature=0.2,   # baja: prioriza precisión sobre creatividad
     )
-    return respuesta.text or "No pude generar una respuesta. Probá reformular la pregunta."
+    respuesta, modelo_usado = generar_con_respaldo(cliente, modelo, contenidos, configuracion)
+    texto = respuesta.text or "No pude generar una respuesta. Probá reformular la pregunta."
+    return texto, modelo_usado
 
 
 def extraer_fuentes_web(respuesta) -> list[dict]:
@@ -200,7 +258,7 @@ def extraer_fuentes_web(respuesta) -> list[dict]:
 
 
 def buscar_en_web(clave: str, modelo: str, pregunta: str,
-                  nombres_documentos: list[str]) -> tuple[str, list[dict]]:
+                  nombres_documentos: list[str]) -> tuple[str, list[dict], str]:
     """Consulta a Gemini CON la herramienta de Google Search.
     Solo se llama cuando el usuario autorizó la búsqueda con el botón."""
     cliente = genai.Client(api_key=clave)
@@ -208,17 +266,14 @@ def buscar_en_web(clave: str, modelo: str, pregunta: str,
         f"Tema de referencia (documentos del usuario): {', '.join(nombres_documentos)}\n"
         f"PREGUNTA DEL USUARIO: {pregunta}"
     )
-    respuesta = cliente.models.generate_content(
-        model=modelo,
-        contents=mensaje,
-        config=types.GenerateContentConfig(
-            system_instruction=cargar_prompt(RUTA_PROMPT_WEB),
-            tools=[types.Tool(google_search=types.GoogleSearch())],
-            temperature=0.2,
-        ),
+    configuracion = types.GenerateContentConfig(
+        system_instruction=cargar_prompt(RUTA_PROMPT_WEB),
+        tools=[types.Tool(google_search=types.GoogleSearch())],
+        temperature=0.2,
     )
+    respuesta, modelo_usado = generar_con_respaldo(cliente, modelo, mensaje, configuracion)
     texto = respuesta.text or "No encontré información confiable en la web sobre esa pregunta."
-    return texto, extraer_fuentes_web(respuesta)
+    return texto, extraer_fuentes_web(respuesta), modelo_usado
 
 
 def mostrar_mensaje(mensaje: dict):
@@ -244,6 +299,10 @@ def mostrar_mensaje(mensaje: dict):
                 for fragmento in mensaje["fragmentos"]:
                     st.markdown(f"**{fragmento['cita']}** — relevancia {fragmento['puntaje']:.2f}")
                     st.caption(fragmento["texto"])
+
+        if mensaje.get("modelo_respaldo"):
+            st.caption(f"ℹ️ El modelo principal no estaba disponible (saturado o sin cupo); respondió el modelo de "
+                       f"respaldo «{mensaje['modelo_respaldo']}».")
 
 
 # =====================================================================
@@ -504,9 +563,11 @@ def pagina_consultas():
         if buscar:
             with st.spinner("Buscando en la web..."):
                 try:
-                    texto, fuentes = buscar_en_web(clave_api, modelo, pendiente, nombres_documentos)
+                    texto, fuentes, modelo_usado = buscar_en_web(clave_api, modelo, pendiente,
+                                                                 nombres_documentos)
                     st.session_state.historial.append(
-                        {"rol": "asistente", "tipo": "web", "texto": texto, "fuentes_web": fuentes})
+                        {"rol": "asistente", "tipo": "web", "texto": texto, "fuentes_web": fuentes,
+                         "modelo_respaldo": modelo_usado if modelo_usado != modelo else None})
                 except Exception as error:
                     st.session_state.historial.append(
                         {"rol": "asistente", "tipo": "aviso", "texto": describir_error(error)})
@@ -539,14 +600,18 @@ def pagina_consultas():
 
     with st.spinner("Buscando en los documentos..."):
         try:
-            texto = preguntar_a_documentos(clave_api, modelo, st.session_state.historial,
-                                           pregunta, contexto, nombres_documentos)
+            texto, modelo_usado = preguntar_a_documentos(clave_api, modelo, st.session_state.historial,
+                                                         pregunta, contexto, nombres_documentos)
+            hubo_error = False
         except Exception as error:
-            texto = describir_error(error)
+            texto, modelo_usado, hubo_error = describir_error(error), modelo, True
 
-    respuesta = {"rol": "asistente", "texto": texto}
+    respuesta = {"rol": "asistente", "texto": texto,
+                 "modelo_respaldo": modelo_usado if modelo_usado != modelo else None}
 
-    if MARCADOR_SIN_INFORMACION in texto:
+    if hubo_error:
+        respuesta["tipo"] = "aviso"
+    elif MARCADOR_SIN_INFORMACION in texto:
         # La información no está en los documentos: se avisa y se ofrecen los botones
         detalle = texto.replace(MARCADOR_SIN_INFORMACION, "").strip()
         respuesta["tipo"] = "aviso"
