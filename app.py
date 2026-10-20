@@ -69,10 +69,25 @@ def validar_admin(usuario: str, clave: str) -> bool:
     return usuario_ok and clave_ok
 
 
+def _fecha_de_almacen_py() -> float:
+    """Fecha de modificación de almacen.py. Si el archivo cambia (por ejemplo,
+    al subir una versión nueva a GitHub), cambia este valor y el almacén se
+    vuelve a crear en lugar de seguir usando el viejo guardado en memoria."""
+    try:
+        return (CARPETA / "almacen.py").stat().st_mtime
+    except OSError:
+        return 0.0
+
+
 @st.cache_resource(show_spinner=False)
-def obtener_almacen():
-    """Se crea una sola vez y lo comparten todas las sesiones."""
+def _crear_almacen_en_cache(version_codigo: float, tamanio_configurado: str | None):
     return crear_almacen(obtener_secreto, CARPETA_ALMACEN_LOCAL)
+
+
+def obtener_almacen():
+    """Se crea una sola vez y lo comparten todas las sesiones. Se vuelve a crear
+    si cambia el código de almacen.py o el secret TAMANIO_MAXIMO_MB."""
+    return _crear_almacen_en_cache(_fecha_de_almacen_py(), obtener_secreto("TAMANIO_MAXIMO_MB"))
 
 
 def documentos_guardados(forzar: bool = False):
@@ -361,7 +376,7 @@ def mostrar_subida():
             type=EXTENSIONES_SOPORTADAS,
             accept_multiple_files=True,
             key=f"subida_{st.session_state.clave_subida}",
-            help=f"Máximo {almacen.maximo_mb} MB por archivo. Los formatos viejos .doc y .ppt "
+            help=f"Máximo {getattr(almacen, 'maximo_mb', 50)} MB por archivo. Los formatos viejos .doc y .ppt "
                  "no se pueden leer: guardalos como .docx o .pptx. Si subís un archivo con "
                  "el mismo nombre que uno guardado, se reemplaza.",
         )
