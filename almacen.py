@@ -167,6 +167,25 @@ class AlmacenLocal:
         (self.base / documento.ruta).unlink(missing_ok=True)
         self._ruta_lectura(documento).unlink(missing_ok=True)
 
+    # ----- Datos en formato JSON (por ejemplo, conversaciones) -----
+
+    def leer_json(self, ruta_relativa: str) -> dict | None:
+        ruta = self.base / ruta_relativa
+        if not ruta.exists():
+            return None
+        try:
+            return json.loads(ruta.read_text(encoding="utf-8"))
+        except ValueError:
+            return None
+
+    def escribir_json(self, ruta_relativa: str, datos: dict, descripcion: str):
+        ruta = self.base / ruta_relativa
+        ruta.parent.mkdir(parents=True, exist_ok=True)
+        ruta.write_text(json.dumps(datos, ensure_ascii=False), encoding="utf-8")
+
+    def eliminar_json(self, ruta_relativa: str, descripcion: str):
+        (self.base / ruta_relativa).unlink(missing_ok=True)
+
     # ----- Texto ya extraído (para no repetir el OCR) -----
 
     def _ruta_lectura(self, documento: DocumentoGuardado) -> Path:
@@ -301,6 +320,28 @@ class AlmacenGitHub:
             self._eliminar(self._ruta_lectura(documento), f"texto extraído de {documento.nombre}")
         except Exception:
             pass   # si no se puede borrar el texto guardado, no es grave
+
+    # ----- Datos en formato JSON (por ejemplo, conversaciones) -----
+
+    def leer_json(self, ruta_relativa: str) -> dict | None:
+        respuesta = self.sesion.get(self._url(f"{self.carpeta}/{ruta_relativa}"),
+                                    params={"ref": self.rama},
+                                    headers={"Accept": "application/vnd.github.raw+json"},
+                                    timeout=30)
+        if respuesta.status_code == 404:
+            return None
+        self._revisar(respuesta, f"leer {ruta_relativa}")
+        try:
+            return json.loads(respuesta.content.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            return None
+
+    def escribir_json(self, ruta_relativa: str, datos: dict, descripcion: str):
+        contenido = json.dumps(datos, ensure_ascii=False).encode("utf-8")
+        self._escribir(f"{self.carpeta}/{ruta_relativa}", contenido, descripcion)
+
+    def eliminar_json(self, ruta_relativa: str, descripcion: str):
+        self._eliminar(f"{self.carpeta}/{ruta_relativa}", descripcion)
 
     # ----- Texto ya extraído (para no repetir el OCR cada vez que la app se reinicia) -----
 

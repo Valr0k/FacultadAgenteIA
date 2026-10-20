@@ -22,6 +22,7 @@ from google.genai import types
 
 from almacen import (CARPETA_POR_FORMATO, ICONO_POR_FORMATO, ErrorDeAlmacen, crear_almacen,
                      limpiar_nombre)
+from conversaciones import GestorDeConversaciones, fecha_legible
 from documentos import (EXTENSIONES_SOPORTADAS, Buscador, armar_contexto, leer_documento,
                         lectura_a_diccionario, lectura_desde_diccionario)
 
@@ -329,6 +330,9 @@ def mostrar_mensaje(mensaje: dict):
 # =====================================================================
 valores_iniciales = {
     "historial": [],
+    "conversacion_id": None,          # None = conversación nueva, todavía no guardada
+    "indice_conversaciones": None,    # lista de conversaciones guardadas (se carga una vez)
+    "aviso_conversacion": None,
     "pregunta_pendiente_web": None,   # pregunta no encontrada, esperando la decisión del usuario
     "inactivos": set(),               # rutas de documentos que el usuario no quiere consultar
     "clave_subida": 0,                # se cambia para vaciar el cuadro de subida después de guardar
@@ -355,6 +359,71 @@ def cambiar_activo(ruta: str):
 
 
 almacen = obtener_almacen()
+gestor_conversaciones = GestorDeConversaciones(almacen)
+
+
+# ---------- Conversaciones guardadas ----------
+
+def conversaciones_guardadas(forzar: bool = False) -> list[dict]:
+    if forzar or st.session_state.indice_conversaciones is None:
+        try:
+            st.session_state.indice_conversaciones = gestor_conversaciones.listar()
+        except Exception:
+            st.session_state.indice_conversaciones = []
+    return st.session_state.indice_conversaciones
+
+
+def guardar_conversacion_actual():
+    """Se llama después de cada respuesta. Si falla (por ejemplo, GitHub no
+    responde), se avisa pero el chat sigue funcionando."""
+    if not any(m["rol"] == "usuario" for m in st.session_state.historial):
+        return
+    try:
+        st.session_state.conversacion_id = gestor_conversaciones.guardar(
+            st.session_state.conversacion_id,
+            st.session_state.historial,
+            st.session_state.pregunta_pendiente_web,
+        )
+        conversaciones_guardadas(forzar=True)
+    except Exception as error:
+        st.session_state.aviso_conversacion = f"No se pudo guardar la conversación: {error}"
+
+
+def nueva_conversacion():
+    st.session_state.historial = []
+    st.session_state.conversacion_id = None
+    st.session_state.pregunta_pendiente_web = None
+    st.session_state.pagina = PAGINA_CONSULTAS
+
+
+def abrir_conversacion(id_conversacion: str):
+    try:
+        datos = gestor_conversaciones.cargar(id_conversacion)
+    except Exception as error:
+        datos, st.session_state.aviso_conversacion = None, f"No se pudo abrir la conversación: {error}"
+    if not datos:
+        st.session_state.aviso_conversacion = (st.session_state.aviso_conversacion
+                                               or "La conversación ya no existe.")
+        conversaciones_guardadas(forzar=True)
+        return
+    st.session_state.historial = datos.get("historial", [])
+    st.session_state.pregunta_pendiente_web = datos.get("pendiente_web")
+    st.session_state.conversacion_id = id_conversacion
+    st.session_state.pagina = PAGINA_CONSULTAS
+
+
+def borrar_conversacion(id_conversacion: str):
+    if not st.session_state.es_admin:   # control por seguridad
+        return
+    try:
+        gestor_conversaciones.borrar(id_conversacion)
+    except Exception as error:
+        st.session_state.aviso_conversacion = f"No se pudo borrar la conversación: {error}"
+    if st.session_state.conversacion_id == id_conversacion:
+        nueva_conversacion()
+    conversaciones_guardadas(forzar=True)
+
+
 documentos = documentos_guardados()
 documentos_activos = [d for d in documentos if d.ruta not in st.session_state.inactivos]
 
@@ -365,6 +434,28 @@ with st.sidebar:
     st.header("📄 DocuGuía")
     pagina = st.radio("Ir a", [PAGINA_CONSULTAS, PAGINA_REPOSITORIO], key="pagina",
                       label_visibility="collapsed")
+
+    # ---------- Conversaciones ----------
+    st.divider()
+    st.button("➕ Nueva conversación", on_click=nueva_conversacion, use_container_width=True,
+              type="primary" if st.session_state.conversacion_id is None else "secondary")
+    lista_conversaciones = conversaciones_guardadas()
+    if lista_conversaciones:
+        st.markdown("**🗂️ Conversaciones guardadas**")
+        with st.container(height=min(60 + 52 * len(lista_conversaciones), 330), border=False):
+            for conversacion in lista_conversaciones:
+                es_la_actual = conversacion["id"] == st.session_state.conversacion_id
+                st.button(
+                    conversacion.get("titulo", "Sin título"),
+                    key=f"conv_{conversacion['id']}",
+                    on_click=abrir_conversacion, args=(conversacion["id"],),
+                    type="primary" if es_la_actual else "secondary",
+                    use_container_width=True,
+                    help=f"{fecha_legible(conversacion.get('actualizada'))} · "
+                         f"{conversacion.get('preguntas', 0)} pregunta(s)",
+                )
+    else:
+        st.caption("Todavía no hay conversaciones guardadas.")
 
     st.divider()
     st.markdown(f"**Documentos guardados:** {len(documentos)}")
@@ -405,11 +496,6 @@ with st.sidebar:
     with st.expander("⚙️ Opciones avanzadas"):
         modelo = st.text_input("Modelo de Gemini", value=MODELO_POR_DEFECTO)
         cantidad_fragmentos = st.slider("Fragmentos por consulta", 3, 15, 8)
-
-    if st.button("Borrar conversación"):
-        st.session_state.historial = []
-        st.session_state.pregunta_pendiente_web = None
-        st.rerun()
 
     st.caption("DocuGuía es un sistema de inteligencia artificial. Puede cometer "
                "errores: verificá siempre las ubicaciones y los links citados.")
@@ -590,6 +676,26 @@ def pagina_consultas():
 
     st.caption(f"Consultando {len(nombres_documentos)} documento(s): {', '.join(nombres_documentos)}")
 
+    # ---------- Encabezado de la conversación ----------
+    if st.session_state.aviso_conversacion:
+        st.warning(st.session_state.aviso_conversacion)
+        st.session_state.aviso_conversacion = None
+    actual = next((c for c in conversaciones_guardadas()
+                   if c["id"] == st.session_state.conversacion_id), None)
+    if actual:
+        columna_titulo, columna_borrar = st.columns([6, 1])
+        columna_titulo.subheader(f"🗂️ {actual.get('titulo', 'Conversación')}")
+        columna_titulo.caption(f"Creada {fecha_legible(actual.get('creada'))} · "
+                               f"última actividad {fecha_legible(actual.get('actualizada'))}")
+        if st.session_state.es_admin:
+            with columna_borrar.popover("🗑️", help="Borrar esta conversación"):
+                st.write("¿Borrar esta conversación? No se puede deshacer.")
+                st.button("Sí, borrar", key="borrar_conversacion", type="primary",
+                          on_click=borrar_conversacion, args=(actual["id"],))
+    elif not st.session_state.historial:
+        st.caption("💡 Nueva conversación: se guarda automáticamente después de la primera "
+                   "respuesta y la podés retomar desde la barra lateral.")
+
     for mensaje in st.session_state.historial:
         mostrar_mensaje(mensaje)
 
@@ -613,6 +719,7 @@ def pagina_consultas():
                     st.session_state.historial.append(
                         {"rol": "asistente", "tipo": "aviso", "texto": describir_error(error)})
             st.session_state.pregunta_pendiente_web = None
+            guardar_conversacion_actual()
             st.rerun()
 
         if no_buscar:
@@ -622,6 +729,7 @@ def pagina_consultas():
                          "sobre tus documentos.",
             })
             st.session_state.pregunta_pendiente_web = None
+            guardar_conversacion_actual()
             st.rerun()
 
     # ---------- Nueva pregunta ----------
@@ -667,6 +775,8 @@ def pagina_consultas():
 
     st.session_state.historial.append({"rol": "usuario", "texto": pregunta})
     st.session_state.historial.append(respuesta)
+    with st.spinner("Guardando la conversación..."):
+        guardar_conversacion_actual()
     st.rerun()
 
 

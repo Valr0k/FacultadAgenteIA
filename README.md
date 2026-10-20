@@ -5,6 +5,7 @@ Asistente de IA que responde preguntas con los documentos guardados en su reposi
 ## Secciones de la app
 
 - **💬 Consultas:** el chat. Usa todos los documentos guardados que estén marcados como "Usar en consultas".
+- **🗂️ Conversaciones guardadas:** cada conversación se guarda sola después de cada respuesta. Desde la barra lateral se puede empezar una **➕ Nueva conversación** o abrir una anterior y seguirla donde quedó (el asistente recuerda lo que se habló en ella). El título es la primera pregunta. Solo el administrador puede borrar conversaciones.
 - **📚 Repositorio de documentos:** para ver, descargar y activar/desactivar documentos. Muestra un resumen y una pestaña por formato (PDF, Word, PowerPoint, Texto).
 - **🔐 Administrador:** **subir y borrar** documentos requiere ingresar con usuario y contraseña desde la barra lateral. Consultar y descargar es libre.
 
@@ -41,6 +42,7 @@ Los formatos viejos `.doc` y `.ppt` no se pueden leer: hay que abrirlos y guarda
 |---|---|
 | `app.py` | Interfaz (Streamlit): páginas de Consultas y Repositorio, llamadas a Gemini |
 | `almacen.py` | Guardado de documentos en GitHub (o en una carpeta local para pruebas) |
+| `conversaciones.py` | Guardado, listado y borrado de conversaciones |
 | `documentos.py` | Lectura de PDF, Word, PowerPoint y texto; fragmentación y búsqueda |
 | `prompt_sistema.txt` | System prompt con los 6 bloques de la guía. **Editalo para iterar**, sin tocar el código |
 | `prompt_web.txt` | Prompt que se usa solo cuando el usuario autoriza la búsqueda web |
@@ -73,7 +75,7 @@ Streamlit Cloud borra los archivos del servidor cada vez que la app se reinicia 
 
 ## 3. Publicar gratis en Streamlit Community Cloud
 
-1. Subí los archivos de la app al repositorio público (`app.py`, `almacen.py`, `documentos.py`, `prompt_sistema.txt`, `prompt_web.txt`, `requirements.txt`, `packages.txt`, `README.md`).
+1. Subí los archivos de la app al repositorio público (`app.py`, `almacen.py`, `conversaciones.py`, `documentos.py`, `prompt_sistema.txt`, `prompt_web.txt`, `requirements.txt`, `packages.txt`, `README.md`).
 2. Entrá a https://share.streamlit.io con tu cuenta de GitHub → **Create app**.
 3. Elegí el repositorio de la app y como archivo principal `app.py`.
 4. En **Advanced settings → Secrets** pegá (con tus datos):
@@ -128,7 +130,9 @@ Sin las variables de GitHub, los documentos se guardan en la carpeta `almacen_do
 - Word no guarda números de página fijos: la página se estima con las marcas que Word deja al guardar, por eso dice "aprox.". Los .docx generados por Google Docs u otros programas a veces no traen esas marcas; en ese caso se cita por sección y párrafo.
 - Las imágenes dentro de documentos Word no se leen con OCR (solo PDF y PowerPoint).
 - TF-IDF busca por palabras y partes de palabras: si la pregunta usa sinónimos que no aparecen en el texto, puede no encontrar el fragmento. Una mejora futura es usar *embeddings*.
-- La conversación (el chat) no se guarda: al recargar la página empieza de cero. Los documentos sí quedan guardados.
+- **Las conversaciones son compartidas:** como no hay cuentas de usuario, cualquiera con el link de la app ve y puede continuar todas las conversaciones guardadas. No escribas datos personales en las preguntas. En un uso real, cada usuario debería ver solo las suyas.
+- Las conversaciones se guardan en `documentos/_conversaciones/` del repositorio privado. Cada respuesta genera dos commits (la conversación y el índice), así que guardar tarda uno o dos segundos.
+- Si dos personas escriben en la misma conversación al mismo tiempo, puede quedar guardada solo la última versión.
 - GitHub no acepta archivos de más de 100 MB, y avisa que los de más de 50 MB son "grandes". Streamlit Community Cloud tiene memoria limitada: muchos archivos muy pesados pueden hacer que la app se reinicie.
 - Con muchos documentos, la primera consulta después de que la app se "despierta" tarda más, porque tiene que descargar y leer todo de nuevo.
 - En el plan gratuito de la API, Google puede usar los datos enviados para mejorar sus modelos: no subas documentos con datos personales.
