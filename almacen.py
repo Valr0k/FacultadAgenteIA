@@ -181,6 +181,13 @@ class AlmacenGitHub:
             404: "no se encontró el repositorio. Revisá el nombre y que el token tenga acceso.",
         }
         detalle = mensajes.get(respuesta.status_code, f"código {respuesta.status_code}.")
+        # Se agrega el mensaje original de GitHub para poder diagnosticar el problema
+        try:
+            mensaje_github = respuesta.json().get("message", "")
+        except Exception:
+            mensaje_github = ""
+        if mensaje_github:
+            detalle += f" (GitHub dice: «{mensaje_github}»)"
         raise ErrorDeAlmacen(f"No se pudo {accion}: {detalle}")
 
     def listar(self) -> list[DocumentoGuardado]:
