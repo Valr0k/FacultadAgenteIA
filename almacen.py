@@ -13,6 +13,7 @@ En los dos casos los archivos quedan separados en carpetas por formato:
 """
 
 import base64
+import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -71,6 +72,29 @@ class DocumentoGuardado:
 
 class ErrorDeAlmacen(Exception):
     """Error al guardar, leer o borrar un documento, con un mensaje para el usuario."""
+
+
+# Carpeta donde se guarda el texto ya extraído de cada documento (incluido el OCR).
+# Así, cuando la app se reinicia, no hace falta volver a leer todo.
+CARPETA_LECTURAS = "_texto_extraido"
+
+
+def empaquetar_lectura(documento: DocumentoGuardado, datos: dict) -> bytes:
+    """Agrega la versión del documento, para saber después si el texto
+    guardado corresponde a esta versión del archivo o a una anterior."""
+    paquete = dict(datos, version_documento=documento.version)
+    return json.dumps(paquete, ensure_ascii=False).encode("utf-8")
+
+
+def lectura_si_corresponde(contenido: bytes, documento: DocumentoGuardado) -> dict | None:
+    """Devuelve el texto guardado solo si es de la misma versión del documento."""
+    try:
+        datos = json.loads(contenido.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return None
+    if datos.get("version_documento") != documento.version:
+        return None
+    return datos
 
 
 def formato_de(nombre: str) -> str | None:
@@ -141,6 +165,23 @@ class AlmacenLocal:
 
     def borrar(self, documento: DocumentoGuardado):
         (self.base / documento.ruta).unlink(missing_ok=True)
+        self._ruta_lectura(documento).unlink(missing_ok=True)
+
+    # ----- Texto ya extraído (para no repetir el OCR) -----
+
+    def _ruta_lectura(self, documento: DocumentoGuardado) -> Path:
+        return self.base / CARPETA_LECTURAS / f"{documento.ruta}.json"
+
+    def leer_lectura(self, documento: DocumentoGuardado) -> dict | None:
+        ruta = self._ruta_lectura(documento)
+        if not ruta.exists():
+            return None
+        return lectura_si_corresponde(ruta.read_bytes(), documento)
+
+    def guardar_lectura(self, documento: DocumentoGuardado, datos: dict):
+        ruta = self._ruta_lectura(documento)
+        ruta.parent.mkdir(parents=True, exist_ok=True)
+        ruta.write_bytes(empaquetar_lectura(documento, datos))
 
 
 # =====================================================================
@@ -221,14 +262,11 @@ class AlmacenGitHub:
         self._revisar(respuesta, "consultar el documento")
         return respuesta.json().get("sha")
 
-    def guardar(self, nombre: str, contenido: bytes) -> bool:
-        """Guarda el archivo. Devuelve True si reemplazó uno con el mismo nombre."""
-        nombre = limpiar_nombre(nombre)
-        formato = validar(nombre, contenido, self.maximo_mb)
-        ruta = f"{self.carpeta}/{CARPETA_POR_FORMATO[formato]}/{nombre}"
+    def _escribir(self, ruta: str, contenido: bytes, descripcion: str) -> bool:
+        """Crea o reemplaza un archivo. Devuelve True si ya existía."""
         sha = self._sha_actual(ruta)   # GitHub lo pide para reemplazar un archivo
         datos = {
-            "message": f"{'Actualiza' if sha else 'Agrega'} {nombre}",
+            "message": f"{'Actualiza' if sha else 'Agrega'} {descripcion}",
             "content": base64.b64encode(contenido).decode("ascii"),
             "branch": self.rama,
         }
@@ -236,19 +274,53 @@ class AlmacenGitHub:
             datos["sha"] = sha
         # Tiempo de espera generoso: un archivo grande puede tardar en subir
         respuesta = self.sesion.put(self._url(ruta), json=datos, timeout=600)
-        self._revisar(respuesta, f"guardar {nombre}")
+        self._revisar(respuesta, f"guardar {descripcion}")
         return sha is not None
 
-    def borrar(self, documento: DocumentoGuardado):
-        sha = self._sha_actual(documento.ruta)
+    def _eliminar(self, ruta: str, descripcion: str):
+        sha = self._sha_actual(ruta)
         if sha is None:
             return
         respuesta = self.sesion.delete(
-            self._url(documento.ruta),
-            json={"message": f"Elimina {documento.nombre}", "sha": sha, "branch": self.rama},
+            self._url(ruta),
+            json={"message": f"Elimina {descripcion}", "sha": sha, "branch": self.rama},
             timeout=30,
         )
-        self._revisar(respuesta, f"borrar {documento.nombre}")
+        self._revisar(respuesta, f"borrar {descripcion}")
+
+    def guardar(self, nombre: str, contenido: bytes) -> bool:
+        """Guarda el archivo. Devuelve True si reemplazó uno con el mismo nombre."""
+        nombre = limpiar_nombre(nombre)
+        formato = validar(nombre, contenido, self.maximo_mb)
+        ruta = f"{self.carpeta}/{CARPETA_POR_FORMATO[formato]}/{nombre}"
+        return self._escribir(ruta, contenido, nombre)
+
+    def borrar(self, documento: DocumentoGuardado):
+        self._eliminar(documento.ruta, documento.nombre)
+        try:
+            self._eliminar(self._ruta_lectura(documento), f"texto extraído de {documento.nombre}")
+        except Exception:
+            pass   # si no se puede borrar el texto guardado, no es grave
+
+    # ----- Texto ya extraído (para no repetir el OCR cada vez que la app se reinicia) -----
+
+    def _ruta_lectura(self, documento: DocumentoGuardado) -> str:
+        relativa = documento.ruta.removeprefix(f"{self.carpeta}/")
+        return f"{self.carpeta}/{CARPETA_LECTURAS}/{relativa}.json"
+
+    def leer_lectura(self, documento: DocumentoGuardado) -> dict | None:
+        respuesta = self.sesion.get(self._url(self._ruta_lectura(documento)),
+                                    params={"ref": self.rama},
+                                    headers={"Accept": "application/vnd.github.raw+json"},
+                                    timeout=60)
+        if respuesta.status_code == 404:
+            return None
+        self._revisar(respuesta, f"leer el texto guardado de {documento.nombre}")
+        return lectura_si_corresponde(respuesta.content, documento)
+
+    def guardar_lectura(self, documento: DocumentoGuardado, datos: dict):
+        self._escribir(self._ruta_lectura(documento), empaquetar_lectura(documento, datos),
+                       f"texto extraído de {documento.nombre}")
 
 
 def crear_almacen(obtener_secreto, carpeta_local: Path):

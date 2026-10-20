@@ -9,11 +9,16 @@ Formatos soportados:
 
 Cada fragmento guarda el nombre del archivo y su ubicación dentro de él,
 para que el asistente pueda citar la fuente exacta y el usuario la busque a mano.
+
+OCR (reconocimiento de texto en imágenes): las páginas de PDF y las diapositivas
+que son imágenes (por ejemplo, presentaciones exportadas como fotos) se leen
+con Tesseract. Si Tesseract no está instalado, se avisa y se siguen leyendo
+las páginas que tienen texto.
 """
 
 import io
 import re
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from pypdf import PdfReader
@@ -35,6 +40,16 @@ TAMANIO_FRAGMENTO = 1200   # caracteres por fragmento
 SOLAPAMIENTO = 200         # caracteres compartidos entre fragmentos vecinos
 
 EXTENSIONES_SOPORTADAS = ["pdf", "docx", "pptx", "txt", "md"]
+
+# Si cambia la forma de leer los documentos, se sube este número y el texto
+# guardado de lecturas anteriores se descarta y se vuelve a generar.
+VERSION_LECTOR = "2-ocr"
+
+# ---------- OCR ----------
+MINIMO_TEXTO_SIN_OCR = 100   # si una página/diapositiva tiene menos caracteres, se le aplica OCR
+ESCALA_OCR = 2               # resolución al convertir la página en imagen (2 = ~150 ppp)
+IDIOMAS_OCR = "spa+eng"      # español e inglés (muchos gráficos científicos están en inglés)
+MAXIMO_PAGINAS_OCR = 300     # límite de seguridad para no dejar la app trabada
 
 
 @dataclass
@@ -90,6 +105,58 @@ def dividir_texto(texto: str) -> list[str]:
     return partes
 
 
+def limpiar_texto_ocr(texto: str) -> str:
+    """El OCR de diagramas y fórmulas devuelve líneas de ruido ('qa qa', 'CHa',
+    '[oo] ¡o'). Se quedan solo las líneas que parecen texto: con al menos una
+    palabra de 3 letras y mayoría de letras."""
+    lineas_utiles = []
+    for linea in texto.splitlines():
+        linea = linea.strip(" |*•·-_~")
+        letras = sum(c.isalpha() for c in linea)
+        tiene_palabra = re.search(r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]{3,}", linea)
+        if tiene_palabra and letras >= 4 and letras / max(len(linea), 1) >= 0.6:
+            lineas_utiles.append(linea)
+    return limpiar_texto(" ".join(lineas_utiles))
+
+
+class LectorOCR:
+    """Envuelve Tesseract. Si no está instalado, queda desactivado y lo avisa
+    una sola vez, sin cortar la lectura del documento."""
+
+    def __init__(self):
+        self.disponible = True
+        self.motivo = ""
+        self.paginas_leidas = 0
+        try:
+            import pytesseract
+            pytesseract.get_tesseract_version()
+            idiomas = set(pytesseract.get_languages(config=""))
+            self.idiomas = "+".join(i for i in IDIOMAS_OCR.split("+") if i in idiomas) or "eng"
+            self.pytesseract = pytesseract
+        except Exception:
+            self.disponible = False
+            self.motivo = ("no se pudo aplicar OCR porque Tesseract no está instalado "
+                           "(en Streamlit Cloud se instala con packages.txt).")
+
+    def leer_imagen(self, imagen) -> str:
+        if not self.disponible or self.paginas_leidas >= MAXIMO_PAGINAS_OCR:
+            return ""
+        self.paginas_leidas += 1
+        try:
+            texto = self.pytesseract.image_to_string(imagen.convert("L"), lang=self.idiomas)
+        except Exception:
+            return ""
+        return limpiar_texto_ocr(texto)
+
+    def avisos(self, unidad: str) -> list[str]:
+        if not self.disponible:
+            return [self.motivo]
+        if self.paginas_leidas:
+            return [f"{self.paginas_leidas} {unidad} leída(s) con OCR (reconocimiento de texto "
+                    "en imágenes): el texto puede tener errores de lectura."]
+        return []
+
+
 def rango(desde: int, hasta: int) -> str:
     return str(desde) if desde == hasta else f"{desde}–{hasta}"
 
@@ -133,20 +200,46 @@ def agrupar_unidades(archivo: str, unidades: list[Unidad],
 # =====================================================================
 
 def leer_pdf(nombre: str, contenido: bytes) -> tuple[list[Fragmento], list[str]]:
-    """PDF: se lee página por página. La cita es el número de página del archivo."""
+    """PDF: se lee página por página. La cita es el número de página del archivo.
+    Las páginas con poco o nada de texto (imágenes) se leen con OCR."""
     lector = PdfReader(io.BytesIO(contenido))
+    ocr = LectorOCR()
+    documento_imagen = None   # se abre solo si alguna página necesita OCR
     fragmentos = []
     paginas_vacias = 0
     for numero, pagina in enumerate(lector.pages, start=1):
-        texto = limpiar_texto(pagina.extract_text() or "")
+        try:
+            texto = limpiar_texto(pagina.extract_text() or "")
+        except Exception:
+            texto = ""
+        ubicacion = f"pág. {numero}"
+
+        if len(texto) < MINIMO_TEXTO_SIN_OCR and ocr.disponible:
+            try:
+                if documento_imagen is None:
+                    import pypdfium2
+                    documento_imagen = pypdfium2.PdfDocument(contenido)
+                imagen = documento_imagen[numero - 1].render(scale=ESCALA_OCR).to_pil()
+                texto_ocr = ocr.leer_imagen(imagen)
+                del imagen   # libera memoria enseguida
+            except Exception:
+                texto_ocr = ""
+            if texto_ocr:
+                texto = f"{texto} {texto_ocr}".strip()
+                ubicacion = f"pág. {numero} (texto de imagen)"
+
         if len(texto) < 20:
             paginas_vacias += 1
             continue
         for parte in dividir_texto(texto):
-            fragmentos.append(Fragmento(archivo=nombre, ubicacion=f"pág. {numero}", texto=parte))
-    avisos = []
+            fragmentos.append(Fragmento(archivo=nombre, ubicacion=ubicacion, texto=parte))
+
+    if documento_imagen is not None:
+        documento_imagen.close()   # libera la memoria del PDF abierto para el OCR
+
+    avisos = ocr.avisos("página(s)")
     if paginas_vacias:
-        avisos.append(f"{paginas_vacias} página(s) sin texto legible (pueden ser imágenes escaneadas).")
+        avisos.append(f"{paginas_vacias} página(s) sin texto legible.")
     return fragmentos, avisos
 
 
@@ -256,16 +349,50 @@ def textos_de_formas(formas) -> list[str]:
     return textos
 
 
+def imagenes_de_formas(formas) -> list:
+    """Devuelve las imágenes de una diapositiva (incluidas las de grupos)."""
+    from pptx.enum.shapes import MSO_SHAPE_TYPE
+
+    imagenes = []
+    for forma in formas:
+        if forma.shape_type == MSO_SHAPE_TYPE.GROUP:
+            imagenes.extend(imagenes_de_formas(forma.shapes))
+        elif forma.shape_type == MSO_SHAPE_TYPE.PICTURE:
+            imagenes.append(forma)
+    return imagenes
+
+
 def leer_pptx(nombre: str, contenido: bytes) -> tuple[list[Fragmento], list[str]]:
     """PowerPoint: se lee diapositiva por diapositiva, incluyendo las notas
-    del orador. La cita es el número de diapositiva."""
+    del orador. La cita es el número de diapositiva. Si una diapositiva tiene
+    poco texto, se aplica OCR a sus imágenes."""
     from pptx import Presentation
 
     presentacion = Presentation(io.BytesIO(contenido))
+    ocr = LectorOCR()
     fragmentos = []
     diapositivas_vacias = 0
     for numero, diapositiva in enumerate(presentacion.slides, start=1):
         textos = textos_de_formas(diapositiva.shapes)
+        ubicacion = f"diapositiva {numero}"
+
+        if len(" ".join(textos)) < MINIMO_TEXTO_SIN_OCR and ocr.disponible:
+            from PIL import Image
+            textos_ocr = []
+            for forma in imagenes_de_formas(diapositiva.shapes):
+                try:
+                    imagen = Image.open(io.BytesIO(forma.image.blob))
+                    if imagen.width < 200 or imagen.height < 100:
+                        continue   # íconos y logos chicos: no vale la pena
+                    texto_ocr = ocr.leer_imagen(imagen)
+                except Exception:
+                    texto_ocr = ""
+                if texto_ocr:
+                    textos_ocr.append(texto_ocr)
+            if textos_ocr:
+                textos.extend(textos_ocr)
+                ubicacion = f"diapositiva {numero} (texto de imagen)"
+
         if diapositiva.has_notes_slide:
             notas = limpiar_texto(diapositiva.notes_slide.notes_text_frame.text or "")
             if notas:
@@ -275,10 +402,11 @@ def leer_pptx(nombre: str, contenido: bytes) -> tuple[list[Fragmento], list[str]
             diapositivas_vacias += 1
             continue
         for parte in dividir_texto(texto):
-            fragmentos.append(Fragmento(archivo=nombre, ubicacion=f"diapositiva {numero}", texto=parte))
-    avisos = []
+            fragmentos.append(Fragmento(archivo=nombre, ubicacion=ubicacion, texto=parte))
+
+    avisos = ocr.avisos("imagen(es) de diapositivas")
     if diapositivas_vacias:
-        avisos.append(f"{diapositivas_vacias} diapositiva(s) sin texto (pueden tener solo imágenes).")
+        avisos.append(f"{diapositivas_vacias} diapositiva(s) sin texto legible.")
     return fragmentos, avisos
 
 
@@ -336,24 +464,70 @@ def leer_documento(nombre: str, contenido: bytes) -> tuple[list[Fragmento], list
 
 class Buscador:
     """Encuentra los fragmentos más parecidos a una pregunta usando TF-IDF.
-    Es gratuito, rápido y no gasta cuota de la API."""
+    Es gratuito, rápido y no gasta cuota de la API.
+
+    Combina dos búsquedas:
+    - por palabras completas (precisa), y
+    - por partes de palabras de 3 a 5 letras (tolerante): así "lípidos"
+      encuentra "fosfolípidos", plurales y palabras mal leídas por el OCR
+      (por ejemplo "IPIDOS")."""
+
+    PESO_PALABRAS = 0.5
+    PESO_PARTES = 0.5
+    PUNTAJE_MINIMO = 0.05   # por debajo, el fragmento se considera no relacionado
 
     def __init__(self, fragmentos: list[Fragmento]):
         self.fragmentos = fragmentos
-        self.vectorizador = TfidfVectorizer(
-            strip_accents="unicode",
-            lowercase=True,
-            stop_words=PALABRAS_VACIAS,
-            ngram_range=(1, 2),
-            sublinear_tf=True,
+        textos = [f.texto for f in fragmentos]
+        self.por_palabras = TfidfVectorizer(
+            strip_accents="unicode", lowercase=True, stop_words=PALABRAS_VACIAS,
+            ngram_range=(1, 2), sublinear_tf=True,
         )
-        self.matriz = self.vectorizador.fit_transform([f.texto for f in fragmentos])
+        self.por_partes = TfidfVectorizer(
+            strip_accents="unicode", lowercase=True, analyzer="char_wb",
+            ngram_range=(3, 5), sublinear_tf=True,
+        )
+        self.matriz_palabras = self.por_palabras.fit_transform(textos)
+        self.matriz_partes = self.por_partes.fit_transform(textos)
+
+    def quitar_palabras_vacias(self, consulta: str) -> str:
+        """Para la búsqueda por partes se sacan palabras como 'qué' o 'los',
+        que aparecen en todos lados y no ayudan a encontrar el tema."""
+        palabras = re.findall(r"\w+", consulta.lower())
+        normalizar = self.por_palabras.build_preprocessor()
+        utiles = [p for p in palabras if normalizar(p) not in PALABRAS_VACIAS]
+        return " ".join(utiles) or consulta
 
     def buscar(self, consulta: str, cantidad: int = 8) -> list[tuple[Fragmento, float]]:
-        vector = self.vectorizador.transform([consulta])
-        puntajes = cosine_similarity(vector, self.matriz)[0]
+        puntajes_palabras = cosine_similarity(
+            self.por_palabras.transform([consulta]), self.matriz_palabras)[0]
+        puntajes_partes = cosine_similarity(
+            self.por_partes.transform([self.quitar_palabras_vacias(consulta)]), self.matriz_partes)[0]
+        puntajes = self.PESO_PALABRAS * puntajes_palabras + self.PESO_PARTES * puntajes_partes
         orden = puntajes.argsort()[::-1][:cantidad]
-        return [(self.fragmentos[i], float(puntajes[i])) for i in orden if puntajes[i] > 0]
+        return [(self.fragmentos[i], float(puntajes[i])) for i in orden
+                if puntajes[i] >= self.PUNTAJE_MINIMO]
+
+
+# =====================================================================
+# Conversión para guardar el texto extraído (y no repetir el OCR)
+# =====================================================================
+
+def lectura_a_diccionario(fragmentos: list[Fragmento], avisos: list[str]) -> dict:
+    return {"version_lector": VERSION_LECTOR,
+            "fragmentos": [asdict(f) for f in fragmentos],
+            "avisos": avisos}
+
+
+def lectura_desde_diccionario(datos: dict) -> tuple[list[Fragmento], list[str]] | None:
+    """Devuelve None si el texto guardado es de una versión anterior del lector."""
+    if not isinstance(datos, dict) or datos.get("version_lector") != VERSION_LECTOR:
+        return None
+    try:
+        fragmentos = [Fragmento(**f) for f in datos["fragmentos"]]
+    except (KeyError, TypeError):
+        return None
+    return fragmentos, list(datos.get("avisos", []))
 
 
 def armar_contexto(resultados: list[tuple[Fragmento, float]]) -> str:

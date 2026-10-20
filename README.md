@@ -25,7 +25,9 @@ Los formatos viejos `.doc` y `.ppt` no se pueden leer: hay que abrirlos y guarda
 
 1. **Almacenamiento:** los documentos se guardan en un repositorio privado de GitHub, en carpetas por formato (`documentos/pdf`, `documentos/word`, `documentos/powerpoint`, `documentos/texto`). Cada subida o borrado queda registrado como un commit, así hay historial de cambios.
 2. **Lectura:** cada archivo se lee con la librería de su formato (`pypdf`, `python-docx`, `python-pptx`). El texto se divide en fragmentos de ~1200 caracteres, y cada uno guarda su archivo y su ubicación. Lo leído queda en caché: un documento solo se vuelve a procesar si cambia.
-3. **Recuperación (RAG):** ante cada pregunta, un buscador TF-IDF (`scikit-learn`) elige los 8 fragmentos más relevantes. Es gratis y no gasta cuota de la API.
+   - **OCR:** las páginas de PDF y las diapositivas que son imágenes (por ejemplo, presentaciones exportadas como fotos) se leen con **Tesseract**, un motor de reconocimiento de texto gratuito que corre en el servidor (no usa la API de Gemini). Se aplica a las páginas con menos de 100 caracteres de texto. La cita indica `pág. 29 (texto de imagen)` para que se sepa que vino de OCR.
+   - **Texto guardado:** el OCR tarda unos 3 segundos por página, así que el texto extraído de cada documento se guarda en el almacén (`documentos/_texto_extraido/`). Se hace una sola vez, al subir el documento; si se reemplaza el archivo, se vuelve a leer.
+3. **Recuperación (RAG):** ante cada pregunta, un buscador TF-IDF (`scikit-learn`) elige los 8 fragmentos más relevantes. Combina búsqueda por **palabras completas** y por **partes de palabras** (3 a 5 letras), así "lípidos" también encuentra "fosfolípidos", plurales y palabras mal leídas por el OCR. Es gratis y no gasta cuota de la API.
 4. **Generación:** Gemini recibe el system prompt (`prompt_sistema.txt`), los fragmentos con sus encabezados `Documento | Ubicación` y la pregunta. El prompt lo obliga a citar cada dato.
 5. **Transparencia:** debajo de cada respuesta se ve el desplegable "Fragmentos consultados" con lo que realmente leyó el modelo.
 6. **Búsqueda web con permiso:** si la pregunta es del tema pero la respuesta no está en los documentos, el modelo responde con la etiqueta `[SIN_INFORMACION]`. La app la detecta, muestra un aviso y dos botones: **Sí, buscar en la web** / **No, gracias**.
@@ -42,7 +44,8 @@ Los formatos viejos `.doc` y `.ppt` no se pueden leer: hay que abrirlos y guarda
 | `documentos.py` | Lectura de PDF, Word, PowerPoint y texto; fragmentación y búsqueda |
 | `prompt_sistema.txt` | System prompt con los 6 bloques de la guía. **Editalo para iterar**, sin tocar el código |
 | `prompt_web.txt` | Prompt que se usa solo cuando el usuario autoriza la búsqueda web |
-| `requirements.txt` | Librerías necesarias |
+| `requirements.txt` | Librerías de Python necesarias |
+| `packages.txt` | Programas del sistema que instala Streamlit Cloud (Tesseract para OCR, en español e inglés) |
 
 ## 1. Conseguir la clave de Gemini (gratis)
 
@@ -70,7 +73,7 @@ Streamlit Cloud borra los archivos del servidor cada vez que la app se reinicia 
 
 ## 3. Publicar gratis en Streamlit Community Cloud
 
-1. Subí los archivos de la app al repositorio público (`app.py`, `almacen.py`, `documentos.py`, `prompt_sistema.txt`, `prompt_web.txt`, `requirements.txt`, `README.md`).
+1. Subí los archivos de la app al repositorio público (`app.py`, `almacen.py`, `documentos.py`, `prompt_sistema.txt`, `prompt_web.txt`, `requirements.txt`, `packages.txt`, `README.md`).
 2. Entrá a https://share.streamlit.io con tu cuenta de GitHub → **Create app**.
 3. Elegí el repositorio de la app y como archivo principal `app.py`.
 4. En **Advanced settings → Secrets** pegá (con tus datos):
@@ -91,6 +94,8 @@ Si no configurás `GITHUB_TOKEN` y `GITHUB_REPO_DOCUMENTOS`, la app funciona igu
 > Los pasos de las plataformas pueden cambiar: verificalos en su documentación oficial el día que publiques.
 
 ## Probar en tu computadora (opcional)
+
+Para que funcione el OCR en tu computadora hay que instalar Tesseract aparte (en Windows: el instalador de "Tesseract at UB Mannheim", tildando el idioma español). Sin Tesseract la app funciona igual, pero no lee las páginas que son imágenes.
 
 ```bash
 pip install -r requirements.txt
@@ -116,11 +121,13 @@ Sin las variables de GitHub, los documentos se guardan en la carpeta `almacen_do
 
 - **Hay un solo usuario administrador** con contraseña fija. Alcanza para el TP; en un uso real habría que tener un usuario por persona, contraseñas guardadas cifradas y registro de quién subió o borró cada documento. Cualquiera con el link de la app puede ver y descargar los documentos.
 - La sesión de administrador dura mientras la pestaña del navegador esté abierta: al recargar la página hay que volver a ingresar.
-- Los PDF escaneados (imágenes) y las diapositivas que son solo imágenes no tienen texto: la app avisa cuántas no pudo leer.
+- **OCR:** el texto reconocido en imágenes puede tener errores, sobre todo en títulos con letras decorativas (por ejemplo, "LÍPIDOS" se lee "IPIDOS"), fórmulas químicas, diagramas y texto muy chico. Las fórmulas y los dibujos no se interpretan, solo las palabras.
+- El OCR tarda unos 3 segundos por página: un PDF de 60 páginas escaneadas lleva unos 3–4 minutos al subirlo (una sola vez).
+- Si Tesseract no está instalado (por ejemplo, al probar en Windows sin instalarlo), las páginas que son imágenes no se leen y la app lo avisa.
 - El número de página es el **del archivo PDF**, que puede no coincidir con el número impreso en la hoja.
 - Word no guarda números de página fijos: la página se estima con las marcas que Word deja al guardar, por eso dice "aprox.". Los .docx generados por Google Docs u otros programas a veces no traen esas marcas; en ese caso se cita por sección y párrafo.
-- No se leen imágenes, gráficos ni texto dentro de imágenes en ningún formato.
-- TF-IDF busca por palabras: si la pregunta usa sinónimos que no aparecen en el texto, puede no encontrar el fragmento. Una mejora futura es usar *embeddings*.
+- Las imágenes dentro de documentos Word no se leen con OCR (solo PDF y PowerPoint).
+- TF-IDF busca por palabras y partes de palabras: si la pregunta usa sinónimos que no aparecen en el texto, puede no encontrar el fragmento. Una mejora futura es usar *embeddings*.
 - La conversación (el chat) no se guarda: al recargar la página empieza de cero. Los documentos sí quedan guardados.
 - GitHub no acepta archivos de más de 100 MB, y avisa que los de más de 50 MB son "grandes". Streamlit Community Cloud tiene memoria limitada: muchos archivos muy pesados pueden hacer que la app se reinicie.
 - Con muchos documentos, la primera consulta después de que la app se "despierta" tarda más, porque tiene que descargar y leer todo de nuevo.

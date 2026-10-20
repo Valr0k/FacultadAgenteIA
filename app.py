@@ -20,8 +20,10 @@ import streamlit as st
 from google import genai
 from google.genai import types
 
-from almacen import CARPETA_POR_FORMATO, ICONO_POR_FORMATO, ErrorDeAlmacen, crear_almacen
-from documentos import EXTENSIONES_SOPORTADAS, Buscador, armar_contexto, leer_documento
+from almacen import (CARPETA_POR_FORMATO, ICONO_POR_FORMATO, ErrorDeAlmacen, crear_almacen,
+                     limpiar_nombre)
+from documentos import (EXTENSIONES_SOPORTADAS, Buscador, armar_contexto, leer_documento,
+                        lectura_a_diccionario, lectura_desde_diccionario)
 
 # ---------- Configuración general ----------
 MODELO_POR_DEFECTO = "gemini-flash-latest"   # alias que apunta al Flash vigente
@@ -122,8 +124,25 @@ def contenido_de(ruta: str, version: str, _documento) -> bytes:
 
 @st.cache_data(show_spinner=False, max_entries=200)
 def fragmentos_de(ruta: str, version: str, _documento):
-    """Lee y fragmenta un documento (también queda en caché por versión)."""
-    return leer_documento(_documento.nombre, contenido_de(ruta, version, _documento))
+    """Devuelve el texto de un documento dividido en fragmentos.
+    1) Si ya se leyó antes (texto guardado en el almacén), se usa eso: es instantáneo.
+    2) Si no, se lee el archivo (con OCR si hace falta, puede tardar minutos)
+       y el resultado se guarda en el almacén para la próxima vez."""
+    almacen_actual = obtener_almacen()
+    try:
+        guardado = almacen_actual.leer_lectura(_documento)
+        resultado = lectura_desde_diccionario(guardado) if guardado else None
+        if resultado:
+            return resultado
+    except Exception:
+        pass   # si falla la lectura del texto guardado, se lee el documento de nuevo
+
+    fragmentos, avisos = leer_documento(_documento.nombre, contenido_de(ruta, version, _documento))
+    try:
+        almacen_actual.guardar_lectura(_documento, lectura_a_diccionario(fragmentos, avisos))
+    except Exception:
+        pass   # no poder guardarlo no impide usar el documento ahora
+    return fragmentos, avisos
 
 
 @st.cache_resource(show_spinner=False, max_entries=10)
@@ -439,21 +458,42 @@ def mostrar_subida():
                  "no se pueden leer: guardalos como .docx o .pptx. Si subís un archivo con "
                  "el mismo nombre que uno guardado, se reemplaza.",
         )
+        st.caption("Las páginas que son imágenes (por ejemplo, presentaciones exportadas a PDF "
+                   "como fotos) se leen con OCR al guardar. Puede tardar unos segundos por página, "
+                   "pero se hace una sola vez.")
         if st.button("💾 Guardar en el repositorio", type="primary", disabled=not archivos):
             mensajes = []
+            guardados = []
             with st.spinner("Guardando..."):
                 for archivo in archivos:
                     try:
                         reemplazado = almacen.guardar(archivo.name, archivo.getvalue())
                         accion = "reemplazado" if reemplazado else "guardado"
                         mensajes.append(("ok", f"{archivo.name}: {accion}."))
+                        guardados.append(limpiar_nombre(archivo.name))
                     except ErrorDeAlmacen as error:
                         mensajes.append(("error", str(error)))
                     except Exception as error:
                         mensajes.append(("error", f"{archivo.name}: no se pudo guardar ({error})."))
+
+            # Se leen enseguida (con OCR si hace falta) y se guarda el texto extraído,
+            # así la primera consulta no tiene que esperar.
+            lista = documentos_guardados(forzar=True)
+            for documento in [d for d in lista if d.nombre in guardados]:
+                with st.spinner(f"Leyendo {documento.nombre}... (si tiene páginas escaneadas "
+                                "puede tardar algunos minutos, no cierres la página)"):
+                    try:
+                        fragmentos, avisos = fragmentos_de(documento.ruta, documento.version, documento)
+                        resumen = f"{documento.nombre}: listo para consultas ({len(fragmentos)} fragmentos)."
+                        if avisos:
+                            resumen += " " + " ".join(avisos)
+                        mensajes.append(("ok", resumen))
+                    except Exception as error:
+                        mensajes.append(("error", f"{documento.nombre}: se guardó, pero no se pudo "
+                                                  f"leer ({error})."))
+
             st.session_state.mensajes_repositorio = mensajes
             st.session_state.clave_subida += 1   # vacía el cuadro de subida
-            documentos_guardados(forzar=True)
             st.rerun()
 
 
@@ -535,7 +575,8 @@ def pagina_consultas():
         return
 
     claves = tuple((d.ruta, d.version) for d in documentos_activos)
-    with st.spinner("Preparando documentos..."):
+    with st.spinner("Preparando documentos... (si hay documentos nuevos con páginas escaneadas, "
+                    "la primera vez puede tardar algunos minutos)"):
         buscador, avisos = construir_buscador(claves, documentos_activos)
     nombres_documentos = [d.nombre for d in documentos_activos]
 
