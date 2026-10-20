@@ -16,7 +16,7 @@ import streamlit as st
 from google import genai
 from google.genai import types
 
-from documentos import Buscador, armar_contexto, leer_pdf
+from documentos import EXTENSIONES_SOPORTADAS, Buscador, armar_contexto, leer_documento
 
 # ---------- Configuración general ----------
 MODELO_POR_DEFECTO = "gemini-flash-latest"   # alias que apunta al Flash vigente
@@ -51,9 +51,9 @@ def cargar_prompt(ruta: Path) -> str:
 
 
 @st.cache_data(show_spinner=False)
-def procesar_pdf(nombre: str, contenido: bytes):
-    """Se guarda en caché para no volver a leer el mismo PDF en cada pregunta."""
-    return leer_pdf(nombre, contenido)
+def procesar_documento(nombre: str, contenido: bytes):
+    """Se guarda en caché para no volver a leer el mismo archivo en cada pregunta."""
+    return leer_documento(nombre, contenido)
 
 
 def historial_para_gemini(historial: list[dict]) -> list[types.Content]:
@@ -178,20 +178,30 @@ if "pregunta_pendiente_web" not in st.session_state:
 # =====================================================================
 with st.sidebar:
     st.header("📚 Documentos")
-    archivos = st.file_uploader("Subí uno o más PDF", type=["pdf"], accept_multiple_files=True)
+    archivos = st.file_uploader(
+        "Subí uno o más documentos",
+        type=EXTENSIONES_SOPORTADAS,
+        accept_multiple_files=True,
+        help="Formatos: PDF, Word (.docx), PowerPoint (.pptx) y texto (.txt, .md). "
+             "Los formatos viejos .doc y .ppt no se pueden leer: guardalos como .docx o .pptx.",
+    )
 
     nombres_actuales = tuple(sorted((a.name, a.size) for a in archivos or []))
     if nombres_actuales != st.session_state.archivos_cargados:
         todos_los_fragmentos = []
+        avisos_de_lectura = []
         with st.spinner("Leyendo documentos..."):
             for archivo in archivos or []:
-                fragmentos, vacias = procesar_pdf(archivo.name, archivo.getvalue())
+                fragmentos, avisos = procesar_documento(archivo.name, archivo.getvalue())
                 todos_los_fragmentos.extend(fragmentos)
-                if vacias:
-                    st.warning(f"{archivo.name}: {vacias} página(s) sin texto legible "
-                               "(pueden ser imágenes escaneadas).")
+                avisos_de_lectura.extend(f"{archivo.name}: {aviso}" for aviso in avisos)
         st.session_state.buscador = Buscador(todos_los_fragmentos) if todos_los_fragmentos else None
         st.session_state.archivos_cargados = nombres_actuales
+        st.session_state.avisos_de_lectura = avisos_de_lectura
+
+    # Los avisos se guardan para que no desaparezcan al hacer una pregunta
+    for aviso in st.session_state.get("avisos_de_lectura", []):
+        st.warning(aviso)
 
     nombres_documentos = [a.name for a in archivos or []]
     if st.session_state.buscador:
@@ -214,7 +224,8 @@ with st.sidebar:
 # Área principal: chat
 # =====================================================================
 st.title("📄 DocuGuía")
-st.write("Asistente de IA que responde con tus documentos y cita archivo y página. "
+st.write("Asistente de IA que responde con tus documentos (PDF, Word, PowerPoint o texto) "
+         "y cita archivo y ubicación: página, diapositiva, sección o líneas. "
          "Solo busca en la web si vos lo autorizás.")
 
 clave_api = obtener_clave_api()
@@ -262,7 +273,7 @@ if pregunta:
     st.session_state.pregunta_pendiente_web = None
 
     if not st.session_state.buscador:
-        st.warning("Primero subí al menos un PDF en la barra lateral.")
+        st.warning("Primero subí al menos un documento en la barra lateral.")
         st.stop()
 
     mostrar_mensaje({"rol": "usuario", "texto": pregunta})
