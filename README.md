@@ -17,7 +17,9 @@ Asistente de IA que responde preguntas con los documentos guardados en su reposi
 | Word (`.docx`) | Página aproximada, sección (último título) y párrafo | `informe.docx, pág. aprox. 2, sección «Metodología», párrafos 10–14` |
 | Texto (`.txt`, `.md`) | Rango de líneas | `notas.txt, líneas 20–35` |
 
-Los formatos viejos `.doc` y `.ppt` no se pueden leer: hay que abrirlos y guardarlos como `.docx` o `.pptx`. Máximo 20 MB por archivo.
+Los formatos viejos `.doc` y `.ppt` no se pueden leer: hay que abrirlos y guardarlos como `.docx` o `.pptx`.
+
+**Tamaño máximo por archivo:** 50 MB por defecto. Se puede cambiar con el secret `TAMANIO_MAXIMO_MB` (por ejemplo `TAMANIO_MAXIMO_MB = "80"`), hasta un tope de 95 MB, porque GitHub no acepta archivos de más de 100 MB.
 
 ## Cómo funciona (para explicar en el informe)
 
@@ -105,6 +107,7 @@ Sin las variables de GitHub, los documentos se guardan en la carpeta `almacen_do
 - **Modelo:** por defecto usa `gemini-flash-latest`. Si da error de modelo, cambialo en *Opciones avanzadas* (barra lateral) por uno que figure como gratuito en la página de precios de Gemini.
 - **Fragmentos por consulta:** más fragmentos = más contexto, pero más consumo. Con 8 suele alcanzar.
 - **Error de límite (429):** el plan gratuito limita pedidos por minuto y por día. Esperá y reintentá.
+- **Tamaño máximo de archivo:** agregá `TAMANIO_MAXIMO_MB = "80"` (o el número que quieras, hasta 95) en los Secrets. Para documentos más grandes conviene dividirlos (por ejemplo, un PDF por capítulo): además de entrar en el límite, la búsqueda funciona mejor y la app usa menos memoria.
 - **Documentos subidos directo a GitHub:** también podés subir archivos a mano al repositorio privado, dentro de la carpeta del formato correcto. Después tocá **🔄 Actualizar lista** en la app.
 
 ## Limitaciones conocidas (para la sección de reflexión)
@@ -117,6 +120,7 @@ Sin las variables de GitHub, los documentos se guardan en la carpeta `almacen_do
 - No se leen imágenes, gráficos ni texto dentro de imágenes en ningún formato.
 - TF-IDF busca por palabras: si la pregunta usa sinónimos que no aparecen en el texto, puede no encontrar el fragmento. Una mejora futura es usar *embeddings*.
 - La conversación (el chat) no se guarda: al recargar la página empieza de cero. Los documentos sí quedan guardados.
+- GitHub no acepta archivos de más de 100 MB, y avisa que los de más de 50 MB son "grandes". Streamlit Community Cloud tiene memoria limitada: muchos archivos muy pesados pueden hacer que la app se reinicie.
 - Con muchos documentos, la primera consulta después de que la app se "despierta" tarda más, porque tiene que descargar y leer todo de nuevo.
 - En el plan gratuito de la API, Google puede usar los datos enviados para mejorar sus modelos: no subas documentos con datos personales.
 - La búsqueda web (Grounding with Google Search) tiene su propio cupo gratuito, más chico que el de las consultas normales. Revisá el límite vigente en la página de precios de Gemini.

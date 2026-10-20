@@ -20,8 +20,7 @@ import streamlit as st
 from google import genai
 from google.genai import types
 
-from almacen import (CARPETA_POR_FORMATO, ICONO_POR_FORMATO, TAMANIO_MAXIMO_MB,
-                     ErrorDeAlmacen, crear_almacen)
+from almacen import CARPETA_POR_FORMATO, ICONO_POR_FORMATO, ErrorDeAlmacen, crear_almacen
 from documentos import EXTENSIONES_SOPORTADAS, Buscador, armar_contexto, leer_documento
 
 # ---------- Configuración general ----------
@@ -89,7 +88,7 @@ def documentos_guardados(forzar: bool = False):
     return st.session_state.lista_documentos
 
 
-@st.cache_data(show_spinner=False, max_entries=200)
+@st.cache_data(show_spinner=False, max_entries=10)   # pocos: los archivos pueden ser grandes
 def contenido_de(ruta: str, version: str, _documento) -> bytes:
     """Descarga un documento. La caché usa ruta + versión: si el archivo no
     cambió, no se vuelve a descargar."""
@@ -362,7 +361,7 @@ def mostrar_subida():
             type=EXTENSIONES_SOPORTADAS,
             accept_multiple_files=True,
             key=f"subida_{st.session_state.clave_subida}",
-            help=f"Máximo {TAMANIO_MAXIMO_MB} MB por archivo. Los formatos viejos .doc y .ppt "
+            help=f"Máximo {almacen.maximo_mb} MB por archivo. Los formatos viejos .doc y .ppt "
                  "no se pueden leer: guardalos como .docx o .pptx. Si subís un archivo con "
                  "el mismo nombre que uno guardado, se reemplaza.",
         )

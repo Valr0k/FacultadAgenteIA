@@ -39,7 +39,20 @@ CARPETA_POR_FORMATO = {
 
 ICONO_POR_FORMATO = {"PDF": "📕", "Word": "📘", "PowerPoint": "📙", "Texto": "📄"}
 
-TAMANIO_MAXIMO_MB = 20   # límite razonable para la API de GitHub y para el plan gratuito
+# Límite por archivo. Se puede cambiar con el secret TAMANIO_MAXIMO_MB.
+# GitHub no acepta archivos de más de 100 MB, por eso el tope es 95 MB
+# (queda margen porque el archivo viaja codificado y ocupa ~33 % más).
+TAMANIO_MAXIMO_MB_POR_DEFECTO = 50
+TAMANIO_MAXIMO_MB_TOPE = 95
+
+
+def leer_limite(valor) -> int:
+    """Convierte el valor del secret en un límite válido entre 1 y el tope."""
+    try:
+        limite = int(float(valor))
+    except (TypeError, ValueError):
+        return TAMANIO_MAXIMO_MB_POR_DEFECTO
+    return max(1, min(limite, TAMANIO_MAXIMO_MB_TOPE))
 
 
 @dataclass
@@ -71,13 +84,14 @@ def limpiar_nombre(nombre: str) -> str:
     return nombre or "documento"
 
 
-def validar(nombre: str, contenido: bytes) -> str:
+def validar(nombre: str, contenido: bytes, maximo_mb: int) -> str:
     """Revisa formato y tamaño antes de guardar. Devuelve el formato."""
     formato = formato_de(nombre)
     if formato is None:
         raise ErrorDeAlmacen(f"{nombre}: formato no soportado.")
-    if len(contenido) > TAMANIO_MAXIMO_MB * 1024 * 1024:
-        raise ErrorDeAlmacen(f"{nombre}: supera el máximo de {TAMANIO_MAXIMO_MB} MB.")
+    if len(contenido) > maximo_mb * 1024 * 1024:
+        tamanio = len(contenido) / (1024 * 1024)
+        raise ErrorDeAlmacen(f"{nombre}: pesa {tamanio:.1f} MB y el máximo es {maximo_mb} MB.")
     return formato
 
 
@@ -88,8 +102,9 @@ def validar(nombre: str, contenido: bytes) -> str:
 class AlmacenLocal:
     es_persistente_en_la_nube = False
 
-    def __init__(self, carpeta_base: Path):
+    def __init__(self, carpeta_base: Path, maximo_mb: int = TAMANIO_MAXIMO_MB_POR_DEFECTO):
         self.base = carpeta_base
+        self.maximo_mb = maximo_mb
         self.base.mkdir(parents=True, exist_ok=True)
 
     def descripcion(self) -> str:
@@ -117,7 +132,7 @@ class AlmacenLocal:
     def guardar(self, nombre: str, contenido: bytes) -> bool:
         """Guarda el archivo. Devuelve True si reemplazó uno con el mismo nombre."""
         nombre = limpiar_nombre(nombre)
-        formato = validar(nombre, contenido)
+        formato = validar(nombre, contenido, self.maximo_mb)
         destino = self.base / CARPETA_POR_FORMATO[formato] / nombre
         destino.parent.mkdir(parents=True, exist_ok=True)
         existia = destino.exists()
@@ -140,7 +155,8 @@ class AlmacenGitHub:
     API = "https://api.github.com"
 
     def __init__(self, token: str, repositorio: str, rama: str = "main",
-                 carpeta: str = "documentos"):
+                 carpeta: str = "documentos", maximo_mb: int = TAMANIO_MAXIMO_MB_POR_DEFECTO):
+        self.maximo_mb = maximo_mb
         self.repositorio = repositorio.strip().strip("/")
         self.rama = rama
         self.carpeta = carpeta
@@ -201,7 +217,7 @@ class AlmacenGitHub:
     def guardar(self, nombre: str, contenido: bytes) -> bool:
         """Guarda el archivo. Devuelve True si reemplazó uno con el mismo nombre."""
         nombre = limpiar_nombre(nombre)
-        formato = validar(nombre, contenido)
+        formato = validar(nombre, contenido, self.maximo_mb)
         ruta = f"{self.carpeta}/{CARPETA_POR_FORMATO[formato]}/{nombre}"
         sha = self._sha_actual(ruta)   # GitHub lo pide para reemplazar un archivo
         datos = {
@@ -211,7 +227,8 @@ class AlmacenGitHub:
         }
         if sha:
             datos["sha"] = sha
-        respuesta = self.sesion.put(self._url(ruta), json=datos, timeout=120)
+        # Tiempo de espera generoso: un archivo grande puede tardar en subir
+        respuesta = self.sesion.put(self._url(ruta), json=datos, timeout=600)
         self._revisar(respuesta, f"guardar {nombre}")
         return sha is not None
 
@@ -229,9 +246,10 @@ class AlmacenGitHub:
 
 def crear_almacen(obtener_secreto, carpeta_local: Path):
     """Usa GitHub si están configurados los secretos; si no, una carpeta local."""
+    maximo_mb = leer_limite(obtener_secreto("TAMANIO_MAXIMO_MB"))
     token = obtener_secreto("GITHUB_TOKEN")
     repositorio = obtener_secreto("GITHUB_REPO_DOCUMENTOS")
     if token and repositorio:
         rama = obtener_secreto("GITHUB_RAMA_DOCUMENTOS") or "main"
-        return AlmacenGitHub(token, repositorio, rama)
-    return AlmacenLocal(carpeta_local)
+        return AlmacenGitHub(token, repositorio, rama, maximo_mb=maximo_mb)
+    return AlmacenLocal(carpeta_local, maximo_mb=maximo_mb)
