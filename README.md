@@ -1,6 +1,12 @@
 # DocuGuía
 
-Asistente de IA que responde preguntas con los documentos que subís (PDF, Word, PowerPoint o texto) y cita el archivo y la ubicación de cada dato para que puedas verificarlo a mano. Solo busca en la web si el usuario lo autoriza.
+Asistente de IA que responde preguntas con los documentos guardados en su repositorio (PDF, Word, PowerPoint o texto) y cita el archivo y la ubicación de cada dato para que puedas verificarlo a mano. Los documentos quedan guardados para las próximas consultas. Solo busca en la web si el usuario lo autoriza.
+
+## Secciones de la app
+
+- **💬 Consultas:** el chat. Usa todos los documentos guardados que estén marcados como "Usar en consultas".
+- **📚 Repositorio de documentos:** para ver, descargar y activar/desactivar documentos. Muestra un resumen y una pestaña por formato (PDF, Word, PowerPoint, Texto).
+- **🔐 Administrador:** **subir y borrar** documentos requiere ingresar con usuario y contraseña desde la barra lateral. Consultar y descargar es libre.
 
 ## Formatos soportados y cómo se citan
 
@@ -11,26 +17,26 @@ Asistente de IA que responde preguntas con los documentos que subís (PDF, Word,
 | Word (`.docx`) | Página aproximada, sección (último título) y párrafo | `informe.docx, pág. aprox. 2, sección «Metodología», párrafos 10–14` |
 | Texto (`.txt`, `.md`) | Rango de líneas | `notas.txt, líneas 20–35` |
 
-Los formatos viejos `.doc` y `.ppt` no se pueden leer: hay que abrirlos y guardarlos como `.docx` o `.pptx`.
+Los formatos viejos `.doc` y `.ppt` no se pueden leer: hay que abrirlos y guardarlos como `.docx` o `.pptx`. Máximo 20 MB por archivo.
 
 ## Cómo funciona (para explicar en el informe)
 
-1. **Lectura:** cada archivo se lee con la librería de su formato (`pypdf`, `python-docx`, `python-pptx`). El texto se divide en fragmentos de ~1200 caracteres, y cada uno guarda su archivo y su ubicación (página, diapositiva, sección o líneas).
-2. **Recuperación (RAG):** ante cada pregunta, un buscador TF-IDF (`scikit-learn`) elige los 8 fragmentos más relevantes. Es gratis y no gasta cuota de la API.
-3. **Generación:** Gemini recibe el system prompt (`prompt_sistema.txt`), los fragmentos con sus encabezados `Documento | Página` y la pregunta. El prompt lo obliga a citar `(Fuente: archivo.pdf, pág. N)`.
-4. **Transparencia:** debajo de cada respuesta se ve el desplegable "Fragmentos consultados" con lo que realmente leyó el modelo.
-5. **Búsqueda web con permiso:** si la pregunta es del tema pero la respuesta no está en los documentos, el modelo responde con la etiqueta `[SIN_INFORMACION]`. La app la detecta, muestra un aviso y dos botones: **Sí, buscar en la web** / **No, gracias**.
+1. **Almacenamiento:** los documentos se guardan en un repositorio privado de GitHub, en carpetas por formato (`documentos/pdf`, `documentos/word`, `documentos/powerpoint`, `documentos/texto`). Cada subida o borrado queda registrado como un commit, así hay historial de cambios.
+2. **Lectura:** cada archivo se lee con la librería de su formato (`pypdf`, `python-docx`, `python-pptx`). El texto se divide en fragmentos de ~1200 caracteres, y cada uno guarda su archivo y su ubicación. Lo leído queda en caché: un documento solo se vuelve a procesar si cambia.
+3. **Recuperación (RAG):** ante cada pregunta, un buscador TF-IDF (`scikit-learn`) elige los 8 fragmentos más relevantes. Es gratis y no gasta cuota de la API.
+4. **Generación:** Gemini recibe el system prompt (`prompt_sistema.txt`), los fragmentos con sus encabezados `Documento | Ubicación` y la pregunta. El prompt lo obliga a citar cada dato.
+5. **Transparencia:** debajo de cada respuesta se ve el desplegable "Fragmentos consultados" con lo que realmente leyó el modelo.
+6. **Búsqueda web con permiso:** si la pregunta es del tema pero la respuesta no está en los documentos, el modelo responde con la etiqueta `[SIN_INFORMACION]`. La app la detecta, muestra un aviso y dos botones: **Sí, buscar en la web** / **No, gracias**.
    - Solo si el usuario acepta, se hace una segunda consulta a Gemini con la herramienta **Google Search** activada y con otro prompt (`prompt_web.txt`).
    - La respuesta web se marca con un cartel azul, empieza con una advertencia de "corroborá esta información" y muestra la lista de links consultados.
    - Si la pregunta está fuera del tema de los documentos, no se ofrece buscar: se rechaza.
-
-En el modo normal el asistente no tiene herramienta de búsqueda web: solo ve los fragmentos que le pasa la app. La búsqueda web es una herramienta aparte que solo se activa con el botón.
 
 ## Archivos
 
 | Archivo | Qué contiene |
 |---|---|
-| `app.py` | Interfaz de chat (Streamlit) y llamada a Gemini |
+| `app.py` | Interfaz (Streamlit): páginas de Consultas y Repositorio, llamadas a Gemini |
+| `almacen.py` | Guardado de documentos en GitHub (o en una carpeta local para pruebas) |
 | `documentos.py` | Lectura de PDF, Word, PowerPoint y texto; fragmentación y búsqueda |
 | `prompt_sistema.txt` | System prompt con los 6 bloques de la guía. **Editalo para iterar**, sin tocar el código |
 | `prompt_web.txt` | Prompt que se usa solo cuando el usuario autoriza la búsqueda web |
@@ -42,45 +48,76 @@ En el modo normal el asistente no tiene herramienta de búsqueda web: solo ve lo
 2. Botón **Get API key** → **Create API key**.
 3. Copiala y guardala. **No la subas a GitHub.**
 
-## 2. Probar en tu computadora (opcional)
+## 2. Crear el repositorio privado para los documentos
+
+Streamlit Cloud borra los archivos del servidor cada vez que la app se reinicia o se "duerme". Por eso los documentos se guardan en un repositorio de GitHub aparte.
+
+1. En GitHub: **+ → New repository**.
+   - Nombre: por ejemplo `FacultadAgenteIA-documentos`.
+   - Marcá **Private** (así los documentos no son públicos).
+   - Tildá **Add a README file** (el repositorio no puede quedar vacío).
+   - **Create repository**.
+2. Crear un token para que la app pueda escribir en ese repositorio:
+   - Tu foto (arriba a la derecha) → **Settings** → **Developer settings** (abajo de todo) → **Personal access tokens** → **Fine-grained tokens** → **Generate new token**.
+   - **Token name:** `docuguia`. **Expiration:** elegí una fecha posterior a la entrega del TP.
+   - **Repository access:** *Only select repositories* → elegí `FacultadAgenteIA-documentos` (solo ese).
+   - **Permissions → Repository permissions → Contents:** *Read and write*.
+   - **Generate token** y copialo (GitHub lo muestra una sola vez).
+
+> El token da acceso solo a ese repositorio. Igual tratalo como una contraseña: no lo pegues en ningún archivo del repositorio de la app.
+
+## 3. Publicar gratis en Streamlit Community Cloud
+
+1. Subí los archivos de la app al repositorio público (`app.py`, `almacen.py`, `documentos.py`, `prompt_sistema.txt`, `prompt_web.txt`, `requirements.txt`, `README.md`).
+2. Entrá a https://share.streamlit.io con tu cuenta de GitHub → **Create app**.
+3. Elegí el repositorio de la app y como archivo principal `app.py`.
+4. En **Advanced settings → Secrets** pegá (con tus datos):
+   ```
+   GEMINI_API_KEY = "tu_clave_de_gemini"
+   GITHUB_TOKEN = "tu_token_de_github"
+   GITHUB_REPO_DOCUMENTOS = "Valr0k/FacultadAgenteIA-documentos"
+   ADMIN_USUARIO = "admin"
+   ADMIN_CLAVE = "tu_contraseña_de_admin"
+   ```
+   Si la app ya estaba publicada: en share.streamlit.io, menú **⋮** de la app → **Settings → Secrets**, agregá las líneas nuevas y guardá.
+
+   > El usuario y la contraseña de administrador van **solo** en los Secrets, nunca en el código: el repositorio de la app es público y cualquiera podría leerlos. Si no se configuran, nadie puede subir ni borrar documentos desde la app.
+5. **Deploy**. Te da un link público para la demo.
+
+Si no configurás `GITHUB_TOKEN` y `GITHUB_REPO_DOCUMENTOS`, la app funciona igual pero guarda en una carpeta local (`almacen_documentos/`), que en Streamlit Cloud se pierde al reiniciar. La página del repositorio lo avisa.
+
+> Los pasos de las plataformas pueden cambiar: verificalos en su documentación oficial el día que publiques.
+
+## Probar en tu computadora (opcional)
 
 ```bash
 pip install -r requirements.txt
 # Windows (PowerShell):  $env:GEMINI_API_KEY="tu_clave"
 # Linux / Mac:           export GEMINI_API_KEY="tu_clave"
+# Para probar el ingreso de administrador, definí también ADMIN_USUARIO y ADMIN_CLAVE de la misma forma.
 streamlit run app.py
 ```
 
-## 3. Publicar gratis en Streamlit Community Cloud
-
-1. Creá un repositorio en GitHub y subí los archivos (`app.py`, `documentos.py`, `prompt_sistema.txt`, `prompt_web.txt`, `requirements.txt`).
-2. Entrá a https://share.streamlit.io con tu cuenta de GitHub → **Create app**.
-3. Elegí el repositorio y como archivo principal `app.py`.
-   (Si la app ya estaba publicada, al actualizar `requirements.txt` Streamlit reinstala las librerías solo; puede tardar unos minutos más que lo habitual.)
-4. En **Advanced settings → Secrets** pegá:
-   ```
-   GEMINI_API_KEY = "tu_clave"
-   ```
-5. **Deploy**. Te da un link público para la demo.
-
-Alternativa: Hugging Face Spaces. Ahí la clave se carga en *Settings → Variables and secrets* con el nombre `GEMINI_API_KEY`; la app la lee igual.
-
-> Los pasos de las plataformas pueden cambiar: verificalos en su documentación oficial el día que publiques.
+Sin las variables de GitHub, los documentos se guardan en la carpeta `almacen_documentos/` junto a `app.py`.
 
 ## Ajustes útiles
 
 - **Modelo:** por defecto usa `gemini-flash-latest`. Si da error de modelo, cambialo en *Opciones avanzadas* (barra lateral) por uno que figure como gratuito en la página de precios de Gemini.
 - **Fragmentos por consulta:** más fragmentos = más contexto, pero más consumo. Con 8 suele alcanzar.
 - **Error de límite (429):** el plan gratuito limita pedidos por minuto y por día. Esperá y reintentá.
+- **Documentos subidos directo a GitHub:** también podés subir archivos a mano al repositorio privado, dentro de la carpeta del formato correcto. Después tocá **🔄 Actualizar lista** en la app.
 
 ## Limitaciones conocidas (para la sección de reflexión)
 
+- **Hay un solo usuario administrador** con contraseña fija. Alcanza para el TP; en un uso real habría que tener un usuario por persona, contraseñas guardadas cifradas y registro de quién subió o borró cada documento. Cualquiera con el link de la app puede ver y descargar los documentos.
+- La sesión de administrador dura mientras la pestaña del navegador esté abierta: al recargar la página hay que volver a ingresar.
 - Los PDF escaneados (imágenes) y las diapositivas que son solo imágenes no tienen texto: la app avisa cuántas no pudo leer.
 - El número de página es el **del archivo PDF**, que puede no coincidir con el número impreso en la hoja.
 - Word no guarda números de página fijos: la página se estima con las marcas que Word deja al guardar, por eso dice "aprox.". Los .docx generados por Google Docs u otros programas a veces no traen esas marcas; en ese caso se cita por sección y párrafo.
 - No se leen imágenes, gráficos ni texto dentro de imágenes en ningún formato.
 - TF-IDF busca por palabras: si la pregunta usa sinónimos que no aparecen en el texto, puede no encontrar el fragmento. Una mejora futura es usar *embeddings*.
-- Los documentos se guardan solo durante la sesión: al recargar la página hay que subirlos de nuevo.
+- La conversación (el chat) no se guarda: al recargar la página empieza de cero. Los documentos sí quedan guardados.
+- Con muchos documentos, la primera consulta después de que la app se "despierta" tarda más, porque tiene que descargar y leer todo de nuevo.
 - En el plan gratuito de la API, Google puede usar los datos enviados para mejorar sus modelos: no subas documentos con datos personales.
 - La búsqueda web (Grounding with Google Search) tiene su propio cupo gratuito, más chico que el de las consultas normales. Revisá el límite vigente en la página de precios de Gemini.
 - Los links que devuelve Google Search a veces pasan por una dirección intermedia de Google (`vertexaisearch...`) que redirige a la página real: al hacer clic se abre el sitio original.
