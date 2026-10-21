@@ -14,6 +14,7 @@ Ejecutar localmente:  streamlit run app.py
 import copy
 import hmac
 import os
+import re
 import time
 from pathlib import Path
 
@@ -51,6 +52,7 @@ RECOMENDACION_MEDICA = (
 # Cuánto "piensa" el modelo antes de responder: poco = más rápido
 NIVEL_DE_RAZONAMIENTO = "low"
 MODELOS_SIN_AJUSTE_DE_RAZONAMIENTO: set[str] = set()   # se completa sola si un modelo rechaza el ajuste
+TIEMPO_MAXIMO_DE_ESPERA_MS = 30_000   # si Gemini no contesta en 30 s, se reintenta o se pasa a otro modelo
 
 PAGINA_CONSULTAS = "💬 Consultas"
 PAGINA_REPOSITORIO = "📚 Repositorio de documentos"
@@ -210,7 +212,10 @@ def describir_error(error: Exception) -> str:
 
 
 # Errores pasajeros: conviene esperar un poco y reintentar con el mismo modelo
-ERRORES_TEMPORALES = ("503", "UNAVAILABLE", "500", "INTERNAL", "DEADLINE_EXCEEDED", "overloaded")
+ERRORES_TEMPORALES = ("503", "UNAVAILABLE", "500", "INTERNAL", "DEADLINE_EXCEEDED", "overloaded",
+                      "timed out", "Timeout", "Errno", "Connection", "RemoteProtocolError")
+# Errores de la conexión en sí: si pasan durante el streaming, se va directo al plan B (sin streaming)
+ERRORES_DE_CONEXION = ("Errno", "closed", "Connection", "RemoteProtocolError")
 # Errores de un modelo en particular: conviene pasar directo al siguiente modelo
 ERRORES_DEL_MODELO = ("429", "RESOURCE_EXHAUSTED", "404", "NOT_FOUND")
 INTENTOS_POR_MODELO = 2
@@ -225,6 +230,16 @@ def lista_de_modelos(principal: str) -> list[str]:
         if modelo and modelo not in modelos:
             modelos.append(modelo)
     return modelos
+
+
+@st.cache_resource(show_spinner=False)
+def cliente_gemini(clave: str):
+    """Una sola conexión con Gemini, que se reutiliza en todas las preguntas.
+    Antes se creaba una por pregunta y, con la respuesta en streaming, la
+    conexión se cerraba mientras todavía llegaba el texto ([Errno 9]).
+    El tiempo máximo evita quedarse esperando indefinidamente."""
+    return genai.Client(api_key=clave,
+                        http_options=types.HttpOptions(timeout=TIEMPO_MAXIMO_DE_ESPERA_MS))
 
 
 def con_razonamiento_bajo(configuracion: types.GenerateContentConfig) -> types.GenerateContentConfig:
@@ -266,6 +281,8 @@ def generar_con_respaldo(cliente, modelo_principal: str, contenidos, configuraci
             except Exception as error:
                 ultimo_error = error
                 texto = str(error)
+                if en_vivo and any(codigo in texto for codigo in ERRORES_DE_CONEXION):
+                    raise   # problema del streaming: quien llama reintenta sin streaming
                 if config.thinking_config is not None and "thinking" in texto.lower():
                     # Este modelo no acepta ese ajuste: se usa sin él y se recuerda para la próxima
                     MODELOS_SIN_AJUSTE_DE_RAZONAMIENTO.add(modelo)
@@ -286,11 +303,12 @@ def describir_temas(temas: dict[str, list[str]]) -> str:
 
 
 def preguntar_a_documentos(clave: str, modelo: str, historial: list[dict],
-                           pregunta: str, contexto: str, temas: dict[str, list[str]]):
+                           pregunta: str, contexto: str, temas: dict[str, list[str]],
+                           en_vivo: bool = True):
     """Consulta a Gemini SIN herramientas: solo puede usar los fragmentos recibidos.
     Devuelve (generador de texto, modelo usado): la respuesta se muestra a
     medida que llega, en lugar de esperar a que esté completa."""
-    cliente = genai.Client(api_key=clave)
+    cliente = cliente_gemini(clave)
     contenidos = historial_para_gemini(historial)
 
     mensaje_actual = (
@@ -307,7 +325,36 @@ def preguntar_a_documentos(clave: str, modelo: str, historial: list[dict],
         system_instruction=cargar_prompt(RUTA_PROMPT_DOCUMENTOS),
         temperature=0.2,   # baja: prioriza precisión sobre creatividad
     )
-    return generar_con_respaldo(cliente, modelo, contenidos, configuracion, en_vivo=True)
+    if en_vivo:
+        return generar_con_respaldo(cliente, modelo, contenidos, configuracion, en_vivo=True)
+    # Plan B sin streaming: devuelve la respuesta completa de una vez
+    respuesta, modelo_usado = generar_con_respaldo(cliente, modelo, contenidos, configuracion)
+    return iter([respuesta.text or ""]), modelo_usado
+
+
+# ---------- Control propio de consultas médicas personales ----------
+# No depende del modelo: si la pregunta combina algo personal ("me duele", "tengo",
+# "puedo tomar") con un término de salud, se deriva al médico sin consultar a Gemini.
+# Una pregunta académica ("¿qué es el colesterol?") no tiene marca personal y no se bloquea.
+_PERSONAL = re.compile(
+    r"\b(me|mi|mis|tengo|tiene|tenes|tenés|tomo|tomar|tomarme|puedo|debo|deberia|debería|"
+    r"conviene|hago|estoy|siento|duele|duelen|mi\s+(hijo|hija|mama|mamá|papa|papá|abuel[oa]))\b",
+    re.IGNORECASE)
+_SALUD = re.compile(
+    r"(dolor|duele|duelen|fiebre|tos\b|gripe|resfr[ií]|mareo|n[aá]usea|v[oó]mit|diarrea|alergi|"
+    r"presi[oó]n|colesterol|az[uú]car en (la )?sangre|diabet|infecci|s[ií]ntoma|diagn[oó]stic|"
+    r"tratamiento|remedio|medicamento|medicina|pastilla|antibi[oó]tic|ibuprofeno|paracetamol|"
+    r"aspirina|amoxicilina|dosis|miligramo|\bmg\b|receta m[eé]dica|an[aá]lisis de sangre|"
+    r"enfermedad|lesi[oó]n|embaraz|vacuna)", re.IGNORECASE)
+
+
+def es_consulta_medica_personal(pregunta: str) -> bool:
+    texto = pregunta.lower()
+    return bool(_PERSONAL.search(texto) and _SALUD.search(texto))
+
+
+# Por si el modelo responde "fuera de tema" pero se olvida de poner la etiqueta
+_FRASE_FUERA_DE_TEMA = "fuera del tema de los documentos"
 
 
 def separar_etiqueta(texto: str) -> tuple[str | None, str]:
@@ -316,6 +363,8 @@ def separar_etiqueta(texto: str) -> tuple[str | None, str]:
     for etiqueta, clase in ETIQUETAS.items():
         if etiqueta in texto:
             return clase, texto.replace(etiqueta, "").strip()
+    if _FRASE_FUERA_DE_TEMA in texto.lower() and len(texto) < 300:
+        return "fuera_de_tema", texto.strip()
     return None, texto
 
 
@@ -346,7 +395,7 @@ def buscar_en_web(clave: str, modelo: str, pregunta: str,
                   temas: dict[str, list[str]]) -> tuple[str, list[dict], str]:
     """Consulta a Gemini CON la herramienta de Google Search.
     Solo se llama cuando el usuario autorizó la búsqueda con el botón."""
-    cliente = genai.Client(api_key=clave)
+    cliente = cliente_gemini(clave)
     mensaje = (
         "DOCUMENTOS DEL USUARIO Y SUS TEMAS (la búsqueda debe ser sobre estos temas):\n"
         f"{describir_temas(temas)}\n\n"
@@ -849,21 +898,38 @@ def pagina_consultas():
     # muestra el texto crudo: se espera al final para dibujarla con su formato.
     inicio = time.time()
     texto, modelo_usado, hubo_error = "", modelo, False
-    with st.chat_message("assistant"):
-        zona = st.empty()
-        zona.caption("Buscando en los documentos…")
-        try:
-            pedazos, modelo_usado = preguntar_a_documentos(
-                clave_api, modelo, st.session_state.historial, pregunta, contexto, temas)
-            for pedazo in pedazos:
-                texto += pedazo
-                if podria_ser_etiqueta(texto) or separar_etiqueta(texto)[0]:
-                    continue
-                zona.markdown(texto + " ▌")
-            if not texto.strip():
+    if es_consulta_medica_personal(pregunta):
+        # Control propio de la app: no hace falta consultar al modelo
+        texto = "[CONSULTA_MEDICA] Entiendo tu consulta, pero no puedo darte consejos médicos."
+    else:
+        with st.chat_message("assistant"):
+            zona = st.empty()
+            zona.caption("Buscando en los documentos…")
+            for en_vivo in (True, False):   # si el streaming falla antes de recibir texto, plan B sin streaming
+                try:
+                    pedazos, modelo_usado = preguntar_a_documentos(
+                        clave_api, modelo, st.session_state.historial, pregunta, contexto, temas,
+                        en_vivo=en_vivo)
+                    for pedazo in pedazos:
+                        texto += pedazo
+                        if podria_ser_etiqueta(texto) or separar_etiqueta(texto)[0]:
+                            continue
+                        zona.markdown(texto + " ▌")
+                    hubo_error = False
+                    break
+                except Exception as error:
+                    hubo_error = True
+                    if texto.strip():   # ya había llegado parte de la respuesta: se conserva
+                        texto += "\n\n*(La respuesta se cortó por un problema de conexión.)*"
+                        hubo_error = False
+                        break
+                    texto = describir_error(error)
+                    if not en_vivo or not any(c in str(error) for c in ERRORES_DE_CONEXION):
+                        break   # el plan B solo sirve si falló la conexión del streaming
+                    texto = ""
+                    zona.caption("Reintentando…")
+            if not hubo_error and not texto.strip():
                 texto = "No pude generar una respuesta. Probá reformular la pregunta."
-        except Exception as error:
-            texto, hubo_error = describir_error(error), True
 
     respuesta = {"rol": "asistente", "texto": texto, "segundos": time.time() - inicio,
                  "modelo_respaldo": modelo_usado if modelo_usado != modelo else None}
