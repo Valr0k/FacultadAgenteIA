@@ -29,10 +29,10 @@ from documentos import (EXTENSIONES_SOPORTADAS, Buscador, armar_contexto, leer_d
                         lectura_a_diccionario, lectura_desde_diccionario)
 
 # ---------- Configuración general ----------
-MODELO_POR_DEFECTO = "gemini-flash-latest"   # alias que apunta al Flash vigente
+MODELO_POR_DEFECTO = "gemini-flash-lite-latest"   # el más rápido; alcanza para responder con fragmentos ya elegidos
 # Si el modelo principal está saturado o sin cupo, se prueban estos en orden.
 # Se pueden cambiar con el secret MODELOS_DE_RESPALDO (separados por comas).
-MODELOS_DE_RESPALDO_POR_DEFECTO = "gemini-flash-lite-latest, gemini-2.5-flash, gemini-2.5-flash-lite"
+MODELOS_DE_RESPALDO_POR_DEFECTO = "gemini-flash-latest, gemini-2.5-flash-lite, gemini-2.5-flash"
 MENSAJES_DE_HISTORIAL = 6                    # turnos previos que recuerda el asistente
 CARPETA = Path(__file__).parent
 RUTA_PROMPT_DOCUMENTOS = CARPETA / "prompt_sistema.txt"
@@ -52,7 +52,7 @@ RECOMENDACION_MEDICA = (
 # Cuánto "piensa" el modelo antes de responder: poco = más rápido
 NIVEL_DE_RAZONAMIENTO = "low"
 MODELOS_SIN_AJUSTE_DE_RAZONAMIENTO: set[str] = set()   # se completa sola si un modelo rechaza el ajuste
-TIEMPO_MAXIMO_DE_ESPERA_MS = 30_000   # si Gemini no contesta en 30 s, se reintenta o se pasa a otro modelo
+TIEMPO_MAXIMO_DE_ESPERA_MS = 20_000   # si un modelo no contesta en 20 s, se pasa al siguiente
 
 PAGINA_CONSULTAS = "💬 Consultas"
 PAGINA_REPOSITORIO = "📚 Repositorio de documentos"
@@ -212,12 +212,14 @@ def describir_error(error: Exception) -> str:
 
 
 # Errores pasajeros: conviene esperar un poco y reintentar con el mismo modelo
-ERRORES_TEMPORALES = ("503", "UNAVAILABLE", "500", "INTERNAL", "DEADLINE_EXCEEDED", "overloaded",
-                      "timed out", "Timeout", "Errno", "Connection", "RemoteProtocolError")
+ERRORES_TEMPORALES = ("503", "UNAVAILABLE", "500", "INTERNAL", "overloaded",
+                      "Errno", "Connection", "RemoteProtocolError")
 # Errores de la conexión en sí: si pasan durante el streaming, se va directo al plan B (sin streaming)
 ERRORES_DE_CONEXION = ("Errno", "closed", "Connection", "RemoteProtocolError")
 # Errores de un modelo en particular: conviene pasar directo al siguiente modelo
-ERRORES_DEL_MODELO = ("429", "RESOURCE_EXHAUSTED", "404", "NOT_FOUND")
+ERRORES_DEL_MODELO = ("429", "RESOURCE_EXHAUSTED", "404", "NOT_FOUND",
+                      # si un modelo tarda demasiado, no conviene volver a esperarlo: se pasa al siguiente
+                      "timed out", "Timeout", "timeout", "DEADLINE_EXCEEDED")
 INTENTOS_POR_MODELO = 2
 ESPERA_ENTRE_INTENTOS = 2   # segundos
 
@@ -260,27 +262,36 @@ def _textos_del_flujo(primero, resto):
 
 
 def generar_con_respaldo(cliente, modelo_principal: str, contenidos, configuracion,
-                         en_vivo: bool = False):
+                         en_vivo: bool = False, registro: list | None = None):
     """Llama a Gemini y, si el modelo está saturado o sin cupo, reintenta y
     prueba con los modelos de respaldo. Devuelve (respuesta, modelo_usado).
     Con en_vivo=True la respuesta es un generador de texto (streaming).
     Los errores que no se arreglan cambiando de modelo (clave inválida,
-    pedido mal armado) se informan enseguida."""
+    pedido mal armado) se informan enseguida.
+    En `registro` se anota cada intento (modelo, resultado, segundos) para
+    poder ver después dónde se fue el tiempo."""
+    registro = registro if registro is not None else []
     ultimo_error = None
     for modelo in lista_de_modelos(modelo_principal):
         config = configuracion if modelo in MODELOS_SIN_AJUSTE_DE_RAZONAMIENTO else con_razonamiento_bajo(configuracion)
         intento = 1
         while intento <= INTENTOS_POR_MODELO:
+            comienzo = time.time()
             try:
                 if en_vivo:
                     flujo = iter(cliente.models.generate_content_stream(
                         model=modelo, contents=contenidos, config=config))
                     primero = next(flujo, None)   # los errores de conexión aparecen acá
+                    registro.append({"modelo": modelo, "resultado": "ok", "segundos": time.time() - comienzo})
                     return _textos_del_flujo(primero, flujo), modelo
-                return cliente.models.generate_content(model=modelo, contents=contenidos, config=config), modelo
+                respuesta = cliente.models.generate_content(model=modelo, contents=contenidos, config=config)
+                registro.append({"modelo": modelo, "resultado": "ok", "segundos": time.time() - comienzo})
+                return respuesta, modelo
             except Exception as error:
                 ultimo_error = error
                 texto = str(error)
+                registro.append({"modelo": modelo, "resultado": resumir_error(texto),
+                                 "segundos": time.time() - comienzo})
                 if en_vivo and any(codigo in texto for codigo in ERRORES_DE_CONEXION):
                     raise   # problema del streaming: quien llama reintenta sin streaming
                 if config.thinking_config is not None and "thinking" in texto.lower():
@@ -298,13 +309,25 @@ def generar_con_respaldo(cliente, modelo_principal: str, contenidos, configuraci
     raise ultimo_error
 
 
+def resumir_error(texto: str) -> str:
+    """Nombre corto del error para el detalle de tiempos."""
+    for clave, nombre in (("429", "sin cupo"), ("RESOURCE_EXHAUSTED", "sin cupo"), ("503", "saturado"),
+                          ("UNAVAILABLE", "saturado"), ("imed out", "tardó demasiado"),
+                          ("imeout", "tardó demasiado"), ("DEADLINE", "tardó demasiado"),
+                          ("404", "modelo no disponible"), ("thinking", "sin ajuste de razonamiento"),
+                          ("403", "clave rechazada"), ("Errno", "conexión"), ("closed", "conexión")):
+        if clave in texto:
+            return nombre
+    return "error"
+
+
 def describir_temas(temas: dict[str, list[str]]) -> str:
     return "\n".join(f"- {archivo}: {', '.join(palabras)}" for archivo, palabras in temas.items())
 
 
 def preguntar_a_documentos(clave: str, modelo: str, historial: list[dict],
                            pregunta: str, contexto: str, temas: dict[str, list[str]],
-                           en_vivo: bool = True):
+                           en_vivo: bool = True, registro: list | None = None):
     """Consulta a Gemini SIN herramientas: solo puede usar los fragmentos recibidos.
     Devuelve (generador de texto, modelo usado): la respuesta se muestra a
     medida que llega, en lugar de esperar a que esté completa."""
@@ -326,9 +349,11 @@ def preguntar_a_documentos(clave: str, modelo: str, historial: list[dict],
         temperature=0.2,   # baja: prioriza precisión sobre creatividad
     )
     if en_vivo:
-        return generar_con_respaldo(cliente, modelo, contenidos, configuracion, en_vivo=True)
+        return generar_con_respaldo(cliente, modelo, contenidos, configuracion, en_vivo=True,
+                                    registro=registro)
     # Plan B sin streaming: devuelve la respuesta completa de una vez
-    respuesta, modelo_usado = generar_con_respaldo(cliente, modelo, contenidos, configuracion)
+    respuesta, modelo_usado = generar_con_respaldo(cliente, modelo, contenidos, configuracion,
+                                                   registro=registro)
     return iter([respuesta.text or ""]), modelo_usado
 
 
@@ -392,7 +417,7 @@ def extraer_fuentes_web(respuesta) -> list[dict]:
 
 
 def buscar_en_web(clave: str, modelo: str, pregunta: str,
-                  temas: dict[str, list[str]]) -> tuple[str, list[dict], str]:
+                  temas: dict[str, list[str]], registro: list | None = None) -> tuple[str, list[dict], str]:
     """Consulta a Gemini CON la herramienta de Google Search.
     Solo se llama cuando el usuario autorizó la búsqueda con el botón."""
     cliente = cliente_gemini(clave)
@@ -406,9 +431,31 @@ def buscar_en_web(clave: str, modelo: str, pregunta: str,
         tools=[types.Tool(google_search=types.GoogleSearch())],
         temperature=0.2,
     )
-    respuesta, modelo_usado = generar_con_respaldo(cliente, modelo, mensaje, configuracion)
+    respuesta, modelo_usado = generar_con_respaldo(cliente, modelo, mensaje, configuracion,
+                                                   registro=registro)
     texto = respuesta.text or "No encontré información confiable en la web sobre esa pregunta."
     return texto, extraer_fuentes_web(respuesta), modelo_usado
+
+
+def _seg(valor: float) -> str:
+    return f"{valor:.1f} s".replace(".", ",")
+
+
+def mostrar_tiempos(mensaje: dict):
+    """Debajo de cada respuesta: cuánto tardó y, si hubo demoras, dónde."""
+    tiempos = mensaje.get("tiempos") or {}
+    partes = [f"⏱️ {_seg(mensaje['segundos'])}"]
+    if tiempos.get("primer_texto") is not None:
+        partes.append(f"primer texto a los {_seg(tiempos['primer_texto'])}")
+    if tiempos.get("modelo"):
+        partes.append(tiempos["modelo"])
+    if not tiempos.get("intentos") and mensaje.get("tipo") == "medica":
+        partes.append("respondido por la app, sin consultar al modelo")
+    st.caption(" · ".join(partes))
+    fallidos = [i for i in tiempos.get("intentos", []) if i["resultado"] != "ok"]
+    if fallidos:
+        st.caption("Intentos fallidos: " + "; ".join(
+            f"{i['modelo']} — {i['resultado']} ({_seg(i['segundos'])})" for i in fallidos))
 
 
 def mostrar_mensaje(mensaje: dict):
@@ -446,7 +493,7 @@ def mostrar_mensaje(mensaje: dict):
             st.caption(f"ℹ️ El modelo principal no estaba disponible (saturado o sin cupo); respondió el modelo de "
                        f"respaldo «{mensaje['modelo_respaldo']}».")
         if mensaje.get("segundos") is not None:
-            st.caption(f"⏱️ {mensaje['segundos']:.1f} s".replace(".", ","))
+            mostrar_tiempos(mensaje)
 
 
 # =====================================================================
@@ -849,10 +896,10 @@ def pagina_consultas():
         no_buscar = columna_no.button("✋ No, gracias", use_container_width=True)
 
         if buscar:
-            inicio = time.time()
+            inicio, registro = time.time(), []
             with st.spinner("Buscando en la web..."):
                 try:
-                    texto, fuentes, modelo_usado = buscar_en_web(clave_api, modelo, pendiente, temas)
+                    texto, fuentes, modelo_usado = buscar_en_web(clave_api, modelo, pendiente, temas, registro)
                     clase, texto = separar_etiqueta(texto)
                     respuesta = {"rol": "asistente", "texto": texto,
                                  "modelo_respaldo": modelo_usado if modelo_usado != modelo else None}
@@ -863,6 +910,8 @@ def pagina_consultas():
                 except Exception as error:
                     respuesta = {"rol": "asistente", "tipo": "error", "texto": describir_error(error)}
             respuesta["segundos"] = time.time() - inicio
+            respuesta["tiempos"] = {"modelo": respuesta.get("modelo_respaldo") or (modelo if registro else None),
+                                    "intentos": registro}
             st.session_state.historial.append(respuesta)
             st.session_state.pregunta_pendiente_web = None
             guardar_conversacion_actual()
@@ -898,6 +947,7 @@ def pagina_consultas():
     # muestra el texto crudo: se espera al final para dibujarla con su formato.
     inicio = time.time()
     texto, modelo_usado, hubo_error = "", modelo, False
+    registro, primer_texto = [], None   # para el detalle de tiempos
     if es_consulta_medica_personal(pregunta):
         # Control propio de la app: no hace falta consultar al modelo
         texto = "[CONSULTA_MEDICA] Entiendo tu consulta, pero no puedo darte consejos médicos."
@@ -909,8 +959,10 @@ def pagina_consultas():
                 try:
                     pedazos, modelo_usado = preguntar_a_documentos(
                         clave_api, modelo, st.session_state.historial, pregunta, contexto, temas,
-                        en_vivo=en_vivo)
+                        en_vivo=en_vivo, registro=registro)
                     for pedazo in pedazos:
+                        if primer_texto is None and pedazo.strip():
+                            primer_texto = time.time() - inicio
                         texto += pedazo
                         if podria_ser_etiqueta(texto) or separar_etiqueta(texto)[0]:
                             continue
@@ -932,7 +984,9 @@ def pagina_consultas():
                 texto = "No pude generar una respuesta. Probá reformular la pregunta."
 
     respuesta = {"rol": "asistente", "texto": texto, "segundos": time.time() - inicio,
-                 "modelo_respaldo": modelo_usado if modelo_usado != modelo else None}
+                 "modelo_respaldo": modelo_usado if modelo_usado != modelo else None,
+                 "tiempos": {"primer_texto": primer_texto, "modelo": None if not registro else modelo_usado,
+                             "intentos": registro}}
     clase, texto_limpio = separar_etiqueta(texto)
 
     if hubo_error:
