@@ -42,7 +42,8 @@ Los formatos viejos `.doc` y `.ppt` no se pueden leer: hay que abrirlos y guarda
 
    Para decidir si una pregunta es "del tema", el modelo recibe los nombres de los documentos y sus **temas principales**, calculados automáticamente con las palabras más importantes de cada documento (TF-IDF). Una pregunta académica sobre salud ("¿qué es el colesterol?") no es una consulta médica personal: se responde con los documentos.
 7. **Búsqueda web con permiso:** si la pregunta es del tema pero la respuesta no está en los documentos, el modelo responde con la etiqueta `[SIN_INFORMACION]`. La app la detecta, muestra un aviso y dos botones: **Sí, buscar en la web** / **No, gracias**.
-   - Solo si el usuario acepta, se hace una segunda consulta a Gemini con la herramienta **Google Search** activada y con otro prompt (`prompt_web.txt`).
+   - Solo si el usuario acepta, la app busca en **Wikipedia** (API pública, gratuita y sin clave): encuentra los artículos relacionados, elige los párrafos relevantes con el mismo buscador TF-IDF y Gemini redacta la respuesta **solo con esos párrafos**, usando otro prompt (`prompt_web.txt`). Los links que se muestran son los de los artículos realmente usados.
+   - La búsqueda con Google desde la API de Gemini (*Grounding with Google Search*) **solo funciona en el plan pago**. Si se activa la facturación en AI Studio, se puede usar agregando el secret `MOTOR_BUSQUEDA_WEB = "google"`.
    - La respuesta web se marca con un cartel azul, empieza con una advertencia de "corroborá esta información" y muestra la lista de links consultados.
    - Si la pregunta está fuera del tema de los documentos, no se ofrece buscar: se rechaza.
 
@@ -147,7 +148,7 @@ Sin las variables de GitHub, los documentos se guardan en la carpeta `almacen_do
 - GitHub no acepta archivos de más de 100 MB, y avisa que los de más de 50 MB son "grandes". Streamlit Community Cloud tiene memoria limitada: muchos archivos muy pesados pueden hacer que la app se reinicie.
 - Con muchos documentos, la primera consulta después de que la app se "despierta" tarda más, porque tiene que descargar y leer todo de nuevo.
 - En el plan gratuito de la API, Google puede usar los datos enviados para mejorar sus modelos: no subas documentos con datos personales.
-- La búsqueda web (Grounding with Google Search) tiene su propio cupo gratuito, más chico que el de las consultas normales. Revisá el límite vigente en la página de precios de Gemini.
-- Los links que devuelve Google Search a veces pasan por una dirección intermedia de Google (`vertexaisearch...`) que redirige a la página real: al hacer clic se abre el sitio original.
+- La búsqueda web gratuita se limita a **Wikipedia**: es una fuente general, no académica, y puede tener errores. Por eso la respuesta web siempre advierte que hay que corroborarla. La búsqueda con Google requiere el plan pago de Gemini (según la página de precios, 5.000 búsquedas por mes sin cargo y después US$14 cada 1.000).
+- (Solo con el motor Google) Los links que devuelve Google Search a veces pasan por una dirección intermedia de Google (`vertexaisearch...`) que redirige a la página real: al hacer clic se abre el sitio original.
 - La clasificación (médica, fuera de tema, sin información) la hace el modelo siguiendo el prompt: si alguna vez no pone la etiqueta, la respuesta se muestra como texto normal y no aparecen los botones. Es un buen caso para documentar en las pruebas.
 - Si un guardado en segundo plano falla (por ejemplo, GitHub no responde), la app lo avisa en la siguiente interacción y se reintenta con la próxima pregunta.

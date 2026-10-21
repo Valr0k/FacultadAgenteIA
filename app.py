@@ -25,6 +25,8 @@ from google.genai import types
 from almacen import (CARPETA_POR_FORMATO, ICONO_POR_FORMATO, ErrorDeAlmacen, crear_almacen,
                      limpiar_nombre)
 from conversaciones import ERRORES_DE_GUARDADO, GestorDeConversaciones, fecha_legible
+from busqueda_web import (ErrorDeBusquedaWeb, armar_contexto_web, buscar_articulos,
+                          fragmentos_relevantes)
 from documentos import (EXTENSIONES_SOPORTADAS, Buscador, armar_contexto, leer_documento,
                         lectura_a_diccionario, lectura_desde_diccionario)
 
@@ -32,7 +34,8 @@ from documentos import (EXTENSIONES_SOPORTADAS, Buscador, armar_contexto, leer_d
 MODELO_POR_DEFECTO = "gemini-flash-lite-latest"   # el más rápido; alcanza para responder con fragmentos ya elegidos
 # Si el modelo principal está saturado o sin cupo, se prueban estos en orden.
 # Se pueden cambiar con el secret MODELOS_DE_RESPALDO (separados por comas).
-MODELOS_DE_RESPALDO_POR_DEFECTO = "gemini-flash-latest, gemini-2.5-flash-lite, gemini-2.5-flash"
+# (los modelos 2.5 ya no se habilitan para usuarios nuevos; ver la página de modelos de Gemini)
+MODELOS_DE_RESPALDO_POR_DEFECTO = "gemini-flash-latest, gemini-3.5-flash-lite, gemini-3.8-flash"
 MENSAJES_DE_HISTORIAL = 6                    # turnos previos que recuerda el asistente
 CARPETA = Path(__file__).parent
 RUTA_PROMPT_DOCUMENTOS = CARPETA / "prompt_sistema.txt"
@@ -198,8 +201,14 @@ def historial_para_gemini(historial: list[dict]) -> list[types.Content]:
     return contenidos
 
 
+class AvisoParaElUsuario(Exception):
+    """Error con un mensaje ya redactado para mostrarle al usuario tal cual."""
+
+
 def describir_error(error: Exception) -> str:
     texto = str(error)
+    if isinstance(error, (AvisoParaElUsuario, ErrorDeBusquedaWeb)):
+        return texto   # mensajes ya redactados por la app
     if "429" in texto or "RESOURCE_EXHAUSTED" in texto:
         return "Se alcanzó el límite gratuito de la API. Esperá un minuto y volvé a intentar."
     if "503" in texto or "UNAVAILABLE" in texto or "overloaded" in texto.lower():
@@ -271,7 +280,7 @@ def generar_con_respaldo(cliente, modelo_principal: str, contenidos, configuraci
     En `registro` se anota cada intento (modelo, resultado, segundos) para
     poder ver después dónde se fue el tiempo."""
     registro = registro if registro is not None else []
-    ultimo_error = None
+    ultimo_error, errores = None, []
     for modelo in lista_de_modelos(modelo_principal):
         config = configuracion if modelo in MODELOS_SIN_AJUSTE_DE_RAZONAMIENTO else con_razonamiento_bajo(configuracion)
         intento = 1
@@ -289,6 +298,7 @@ def generar_con_respaldo(cliente, modelo_principal: str, contenidos, configuraci
                 return respuesta, modelo
             except Exception as error:
                 ultimo_error = error
+                errores.append(error)
                 texto = str(error)
                 registro.append({"modelo": modelo, "resultado": resumir_error(texto),
                                  "segundos": time.time() - comienzo})
@@ -306,7 +316,18 @@ def generar_con_respaldo(cliente, modelo_principal: str, contenidos, configuraci
                 if intento < INTENTOS_POR_MODELO:
                     time.sleep(ESPERA_ENTRE_INTENTOS * intento)
                 intento += 1
-    raise ultimo_error
+    raise error_mas_util(errores) if errores else ultimo_error
+
+
+def error_mas_util(errores: list[Exception]) -> Exception:
+    """Si todos los modelos fallan, el último error puede no ser el importante
+    (por ejemplo, "modelo no disponible" tapa un "sin cupo"). Se elige el más útil."""
+    for codigos in (("403", "PERMISSION_DENIED"), ("429", "RESOURCE_EXHAUSTED"),
+                    ("503", "UNAVAILABLE"), ("imed out", "imeout")):
+        for error in errores:
+            if any(c in str(error) for c in codigos):
+                return error
+    return errores[-1]
 
 
 def resumir_error(texto: str) -> str:
@@ -416,10 +437,51 @@ def extraer_fuentes_web(respuesta) -> list[dict]:
     return fuentes
 
 
+def motor_de_busqueda_web() -> str:
+    """'wikipedia' (gratis, predeterminado) o 'google' (requiere el plan pago de Gemini)."""
+    return (obtener_secreto("MOTOR_BUSQUEDA_WEB") or "wikipedia").strip().lower()
+
+
 def buscar_en_web(clave: str, modelo: str, pregunta: str,
                   temas: dict[str, list[str]], registro: list | None = None) -> tuple[str, list[dict], str]:
+    """Búsqueda web autorizada por el usuario con el botón.
+    Devuelve (texto, links usados, modelo que respondió)."""
+    if motor_de_busqueda_web() == "google":
+        return buscar_con_google(clave, modelo, pregunta, temas, registro)
+    return buscar_en_wikipedia(clave, modelo, pregunta, temas, registro)
+
+
+def buscar_en_wikipedia(clave, modelo, pregunta, temas, registro):
+    """Busca en Wikipedia (gratis) y Gemini redacta la respuesta SOLO con los
+    párrafos encontrados. Los links son los de los artículos realmente usados."""
+    articulos = buscar_articulos(pregunta)
+    if not articulos:
+        return "No encontré artículos en Wikipedia sobre esa pregunta.", [], modelo
+    resultados = fragmentos_relevantes(pregunta, articulos)
+    mensaje = (
+        "DOCUMENTOS DEL USUARIO Y SUS TEMAS (la respuesta debe ser sobre estos temas):\n"
+        f"{describir_temas(temas)}\n\n"
+        "FRAGMENTOS DE ARTÍCULOS DE WIKIPEDIA (única fuente permitida):\n\n"
+        f"{armar_contexto_web(resultados)}\n\n"
+        "-----\n"
+        f"PREGUNTA DEL USUARIO: {pregunta}"
+    )
+    configuracion = types.GenerateContentConfig(
+        system_instruction=cargar_prompt(RUTA_PROMPT_WEB), temperature=0.2)
+    respuesta, modelo_usado = generar_con_respaldo(cliente_gemini(clave), modelo, mensaje,
+                                                   configuracion, registro=registro)
+    texto = respuesta.text or "No encontré información confiable en la web sobre esa pregunta."
+    fuentes, vistos = [], set()
+    for fragmento, _ in resultados:
+        if fragmento.ubicacion not in vistos:
+            vistos.add(fragmento.ubicacion)
+            fuentes.append({"titulo": f"Wikipedia — {fragmento.archivo}", "url": fragmento.ubicacion})
+    return texto, fuentes, modelo_usado
+
+
+def buscar_con_google(clave, modelo, pregunta, temas, registro):
     """Consulta a Gemini CON la herramienta de Google Search.
-    Solo se llama cuando el usuario autorizó la búsqueda con el botón."""
+    Atención: según la página de precios de Gemini, solo funciona en el plan pago."""
     cliente = cliente_gemini(clave)
     mensaje = (
         "DOCUMENTOS DEL USUARIO Y SUS TEMAS (la búsqueda debe ser sobre estos temas):\n"
@@ -431,8 +493,15 @@ def buscar_en_web(clave: str, modelo: str, pregunta: str,
         tools=[types.Tool(google_search=types.GoogleSearch())],
         temperature=0.2,
     )
-    respuesta, modelo_usado = generar_con_respaldo(cliente, modelo, mensaje, configuracion,
-                                                   registro=registro)
+    try:
+        respuesta, modelo_usado = generar_con_respaldo(cliente, modelo, mensaje, configuracion,
+                                                       registro=registro)
+    except Exception as error:
+        if "429" in str(error) or "RESOURCE_EXHAUSTED" in str(error):
+            raise AvisoParaElUsuario("La búsqueda con Google requiere el plan pago de la API de Gemini. "
+                               "Para usar la búsqueda gratuita en Wikipedia, borrá el secret "
+                               "MOTOR_BUSQUEDA_WEB o poné \"wikipedia\".") from error
+        raise
     texto = respuesta.text or "No encontré información confiable en la web sobre esa pregunta."
     return texto, extraer_fuentes_web(respuesta), modelo_usado
 
