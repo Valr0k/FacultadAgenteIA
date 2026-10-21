@@ -13,6 +13,7 @@ Ejecutar localmente:  streamlit run app.py
 
 import copy
 import hmac
+import json
 import os
 import re
 import time
@@ -25,8 +26,8 @@ from google.genai import types
 from almacen import (CARPETA_POR_FORMATO, ICONO_POR_FORMATO, ErrorDeAlmacen, crear_almacen,
                      limpiar_nombre)
 from conversaciones import ERRORES_DE_GUARDADO, GestorDeConversaciones, fecha_legible
-from busqueda_web import (ErrorDeBusquedaWeb, armar_contexto_web, buscar_articulos,
-                          fragmentos_relevantes)
+from busqueda_web import (ErrorDeBusquedaWeb, armar_contexto_web, buscar_en_todas_las_fuentes,
+                          consulta_de_busqueda, fragmentos_relevantes)
 from documentos import (EXTENSIONES_SOPORTADAS, Buscador, armar_contexto, leer_documento,
                         lectura_a_diccionario, lectura_desde_diccionario)
 
@@ -438,30 +439,54 @@ def extraer_fuentes_web(respuesta) -> list[dict]:
 
 
 def motor_de_busqueda_web() -> str:
-    """'wikipedia' (gratis, predeterminado) o 'google' (requiere el plan pago de Gemini)."""
-    return (obtener_secreto("MOTOR_BUSQUEDA_WEB") or "wikipedia").strip().lower()
+    """'gratuito' (Wikipedia + Europe PMC + Tavily opcional, predeterminado)
+    o 'google' (requiere el plan pago de Gemini)."""
+    return (obtener_secreto("MOTOR_BUSQUEDA_WEB") or "gratuito").strip().lower()
 
 
-def buscar_en_web(clave: str, modelo: str, pregunta: str,
-                  temas: dict[str, list[str]], registro: list | None = None) -> tuple[str, list[dict], str]:
+def buscar_en_web(clave: str, modelo: str, pregunta: str, temas: dict[str, list[str]],
+                  registro: list | None = None) -> tuple[str, list[dict], str, dict]:
     """Búsqueda web autorizada por el usuario con el botón.
-    Devuelve (texto, links usados, modelo que respondió)."""
+    Devuelve (texto, links usados, modelo que respondió, estado de cada fuente)."""
     if motor_de_busqueda_web() == "google":
-        return buscar_con_google(clave, modelo, pregunta, temas, registro)
-    return buscar_en_wikipedia(clave, modelo, pregunta, temas, registro)
+        texto, fuentes, modelo_usado = buscar_con_google(clave, modelo, pregunta, temas, registro)
+        return texto, fuentes, modelo_usado, {"Google": "búsqueda de Gemini"}
+    return buscar_en_fuentes_gratuitas(clave, modelo, pregunta, temas, registro)
 
 
-def buscar_en_wikipedia(clave, modelo, pregunta, temas, registro):
-    """Busca en Wikipedia (gratis) y Gemini redacta la respuesta SOLO con los
-    párrafos encontrados. Los links son los de los artículos realmente usados."""
-    articulos = buscar_articulos(pregunta)
+def terminos_de_busqueda(clave: str, modelo: str, pregunta: str) -> dict:
+    """Le pide a Gemini palabras clave en español y en inglés (los artículos
+    científicos están casi todos en inglés). Si falla, se usan las palabras
+    de la pregunta tal cual."""
+    basicos = consulta_de_busqueda(pregunta)
+    try:
+        configuracion = types.GenerateContentConfig(
+            temperature=0, response_mime_type="application/json",
+            system_instruction=("Convertí la pregunta en palabras clave para un buscador. Respondé solo con "
+                                'JSON: {"es": "palabras clave en español", "en": "keywords in English"}. '
+                                "Entre 2 y 6 palabras cada una, sin signos de pregunta."))
+        respuesta, _ = generar_con_respaldo(cliente_gemini(clave), modelo, pregunta, configuracion)
+        datos = json.loads(respuesta.text)
+        return {"es": datos.get("es") or basicos, "en": datos.get("en") or basicos}
+    except Exception:
+        return {"es": basicos, "en": basicos}
+
+
+def buscar_en_fuentes_gratuitas(clave, modelo, pregunta, temas, registro):
+    """Consulta Wikipedia, Europe PMC y (si hay clave) Tavily en paralelo, elige
+    los párrafos más relevantes y Gemini redacta la respuesta SOLO con ellos.
+    Los links son los de los textos realmente usados."""
+    terminos = terminos_de_busqueda(clave, modelo, pregunta)
+    articulos, estado = buscar_en_todas_las_fuentes(pregunta, terminos, obtener_secreto("TAVILY_API_KEY"))
     if not articulos:
-        return "No encontré artículos en Wikipedia sobre esa pregunta.", [], modelo
-    resultados = fragmentos_relevantes(pregunta, articulos)
+        return ("No encontré información sobre esa pregunta en las fuentes web consultadas.",
+                [], modelo, estado)
+    # Se ordena por la pregunta y por sus palabras clave en ambos idiomas
+    resultados = fragmentos_relevantes(f"{pregunta} {terminos['es']} {terminos['en']}", articulos)
     mensaje = (
         "DOCUMENTOS DEL USUARIO Y SUS TEMAS (la respuesta debe ser sobre estos temas):\n"
         f"{describir_temas(temas)}\n\n"
-        "FRAGMENTOS DE ARTÍCULOS DE WIKIPEDIA (única fuente permitida):\n\n"
+        "FRAGMENTOS DE FUENTES WEB (única fuente permitida; pueden estar en inglés):\n\n"
         f"{armar_contexto_web(resultados)}\n\n"
         "-----\n"
         f"PREGUNTA DEL USUARIO: {pregunta}"
@@ -475,8 +500,8 @@ def buscar_en_wikipedia(clave, modelo, pregunta, temas, registro):
     for fragmento, _ in resultados:
         if fragmento.ubicacion not in vistos:
             vistos.add(fragmento.ubicacion)
-            fuentes.append({"titulo": f"Wikipedia — {fragmento.archivo}", "url": fragmento.ubicacion})
-    return texto, fuentes, modelo_usado
+            fuentes.append({"titulo": fragmento.archivo, "url": fragmento.ubicacion})
+    return texto, fuentes, modelo_usado, estado
 
 
 def buscar_con_google(clave, modelo, pregunta, temas, registro):
@@ -499,8 +524,8 @@ def buscar_con_google(clave, modelo, pregunta, temas, registro):
     except Exception as error:
         if "429" in str(error) or "RESOURCE_EXHAUSTED" in str(error):
             raise AvisoParaElUsuario("La búsqueda con Google requiere el plan pago de la API de Gemini. "
-                               "Para usar la búsqueda gratuita en Wikipedia, borrá el secret "
-                               "MOTOR_BUSQUEDA_WEB o poné \"wikipedia\".") from error
+                               "Para usar la búsqueda gratuita (Wikipedia, Europe PMC y Tavily), "
+                               "borrá el secret MOTOR_BUSQUEDA_WEB.") from error
         raise
     texto = respuesta.text or "No encontré información confiable en la web sobre esa pregunta."
     return texto, extraer_fuentes_web(respuesta), modelo_usado
@@ -551,6 +576,9 @@ def mostrar_mensaje(mensaje: dict):
                 st.markdown(f"{i}. [{fuente['titulo']}]({fuente['url']})")
         elif mensaje.get("tipo") == "web":
             st.caption("La búsqueda no devolvió links verificables. Tomá esta respuesta con precaución.")
+        if mensaje.get("estado_fuentes"):
+            st.caption("Fuentes consultadas: " + " · ".join(
+                f"{nombre}: {estado}" for nombre, estado in mensaje["estado_fuentes"].items()))
 
         if mensaje.get("fragmentos"):
             with st.expander("🔎 Fragmentos consultados"):
@@ -968,14 +996,16 @@ def pagina_consultas():
             inicio, registro = time.time(), []
             with st.spinner("Buscando en la web..."):
                 try:
-                    texto, fuentes, modelo_usado = buscar_en_web(clave_api, modelo, pendiente, temas, registro)
+                    texto, fuentes, modelo_usado, estado_fuentes = buscar_en_web(
+                        clave_api, modelo, pendiente, temas, registro)
                     clase, texto = separar_etiqueta(texto)
                     respuesta = {"rol": "asistente", "texto": texto,
                                  "modelo_respaldo": modelo_usado if modelo_usado != modelo else None}
                     if clase in ("medica", "fuera_de_tema"):
                         respuesta["tipo"] = clase   # el módulo web también se niega en estos casos
                     else:
-                        respuesta.update({"tipo": "web", "fuentes_web": fuentes})
+                        respuesta.update({"tipo": "web", "fuentes_web": fuentes,
+                                          "estado_fuentes": estado_fuentes})
                 except Exception as error:
                     respuesta = {"rol": "asistente", "tipo": "error", "texto": describir_error(error)}
             respuesta["segundos"] = time.time() - inicio
