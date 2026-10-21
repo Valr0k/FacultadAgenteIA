@@ -36,6 +36,15 @@ PALABRAS_VACIAS = [
     "ya", "yo",
 ]
 
+# Palabras que no describen un tema (se excluyen del resumen de temas de cada documento)
+PALABRAS_GENERICAS = {
+    "partir", "ocurre", "produce", "mediante", "puede", "pueden", "forma", "formas", "tipo", "tipos",
+    "parte", "partes", "cada", "otros", "otras", "otro", "otra", "todos", "todas", "entre", "segun",
+    "durante", "tambien", "ejemplo", "ejemplos", "siguiente", "general", "caso", "casos", "desde",
+    "hasta", "cuando", "donde", "mismo", "misma", "muchos", "algunos", "gran", "mayor", "menor",
+    "tienen", "estan", "esta", "este", "estos", "estas", "sobre", "clase", "unidad", "pagina",
+}
+
 TAMANIO_FRAGMENTO = 1200   # caracteres por fragmento
 SOLAPAMIENTO = 200         # caracteres compartidos entre fragmentos vecinos
 
@@ -489,6 +498,32 @@ class Buscador:
         )
         self.matriz_palabras = self.por_palabras.fit_transform(textos)
         self.matriz_partes = self.por_partes.fit_transform(textos)
+
+    def temas_por_documento(self, cantidad: int = 12) -> dict[str, list[str]]:
+        """Palabras más representativas de cada documento (según TF-IDF).
+        Se le pasan al modelo para que pueda decidir si una pregunta es del
+        tema de los documentos aunque el buscador no haya encontrado fragmentos."""
+        import numpy as np
+        terminos = self.por_palabras.get_feature_names_out()
+        temas = {}
+        for archivo in dict.fromkeys(f.archivo for f in self.fragmentos):
+            filas = [i for i, f in enumerate(self.fragmentos) if f.archivo == archivo]
+            pesos = np.asarray(self.matriz_palabras[filas].sum(axis=0)).ravel()
+            elegidos = []
+            for indice in pesos.argsort()[::-1]:
+                if pesos[indice] <= 0:
+                    break   # el resto de las palabras no aparece en este documento
+                termino = terminos[indice]
+                # Solo palabras sueltas, con letras y de largo razonable: descarta ruido
+                # del OCR (por ejemplo, secuencias de ADN) y verbos o conectores genéricos
+                if (" " in termino or not termino.isalpha() or not 4 <= len(termino) <= 20
+                        or termino in PALABRAS_GENERICAS):
+                    continue
+                elegidos.append(termino)
+                if len(elegidos) == cantidad:
+                    break
+            temas[archivo] = elegidos
+        return temas
 
     def quitar_palabras_vacias(self, consulta: str) -> str:
         """Para la búsqueda por partes se sacan palabras como 'qué' o 'los',

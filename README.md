@@ -31,7 +31,17 @@ Los formatos viejos `.doc` y `.ppt` no se pueden leer: hay que abrirlos y guarda
 3. **Recuperación (RAG):** ante cada pregunta, un buscador TF-IDF (`scikit-learn`) elige los 8 fragmentos más relevantes. Combina búsqueda por **palabras completas** y por **partes de palabras** (3 a 5 letras), así "lípidos" también encuentra "fosfolípidos", plurales y palabras mal leídas por el OCR. Es gratis y no gasta cuota de la API.
 4. **Generación:** Gemini recibe el system prompt (`prompt_sistema.txt`), los fragmentos con sus encabezados `Documento | Ubicación` y la pregunta. El prompt lo obliga a citar cada dato.
 5. **Transparencia:** debajo de cada respuesta se ve el desplegable "Fragmentos consultados" con lo que realmente leyó el modelo.
-6. **Búsqueda web con permiso:** si la pregunta es del tema pero la respuesta no está en los documentos, el modelo responde con la etiqueta `[SIN_INFORMACION]`. La app la detecta, muestra un aviso y dos botones: **Sí, buscar en la web** / **No, gracias**.
+6. **Clasificación de la consulta:** el prompt le pide al modelo que clasifique cada pregunta siguiendo pasos en orden, y que marque su respuesta con una etiqueta. La app lee la etiqueta y decide qué mostrar:
+
+   | Paso | Caso | Etiqueta | Qué hace la app |
+   |---|---|---|---|
+   | 1 | Consulta médica personal (síntomas, tratamientos, medicamentos, dosis) | `[CONSULTA_MEDICA]` | No responde; muestra 🩺 y recomienda consultar a un médico (y emergencias: 107 / 911). Sin botones web. |
+   | 2 | No tiene que ver con los temas de los documentos | `[FUERA_DE_TEMA]` | No responde; muestra 🚫. Sin botones web. |
+   | 3 | Del tema y está en los fragmentos | (sin etiqueta) | Responde con citas. |
+   | 4 | Del tema pero no está en los fragmentos | `[SIN_INFORMACION]` | Aviso ⚠️ y botones para buscar en la web. |
+
+   Para decidir si una pregunta es "del tema", el modelo recibe los nombres de los documentos y sus **temas principales**, calculados automáticamente con las palabras más importantes de cada documento (TF-IDF). Una pregunta académica sobre salud ("¿qué es el colesterol?") no es una consulta médica personal: se responde con los documentos.
+7. **Búsqueda web con permiso:** si la pregunta es del tema pero la respuesta no está en los documentos, el modelo responde con la etiqueta `[SIN_INFORMACION]`. La app la detecta, muestra un aviso y dos botones: **Sí, buscar en la web** / **No, gracias**.
    - Solo si el usuario acepta, se hace una segunda consulta a Gemini con la herramienta **Google Search** activada y con otro prompt (`prompt_web.txt`).
    - La respuesta web se marca con un cartel azul, empieza con una advertencia de "corroborá esta información" y muestra la lista de links consultados.
    - Si la pregunta está fuera del tema de los documentos, no se ofrece buscar: se rechaza.
@@ -113,6 +123,7 @@ Sin las variables de GitHub, los documentos se guardan en la carpeta `almacen_do
 
 - **Modelo:** por defecto usa `gemini-flash-latest`. Si da error de modelo, cambialo en *Opciones avanzadas* (barra lateral) por uno que figure como gratuito en la página de precios de Gemini.
 - **Fragmentos por consulta:** más fragmentos = más contexto, pero más consumo. Con 8 suele alcanzar.
+- **Velocidad:** la respuesta se muestra a medida que el modelo la escribe (streaming); se le pide al modelo un nivel de razonamiento bajo (`thinking_level = low`), porque para responder con fragmentos ya elegidos no hace falta más; y la conversación se guarda en GitHub en segundo plano, sin hacer esperar. Debajo de cada respuesta se muestra cuánto tardó (⏱️).
 - **Modelos de respaldo:** si el modelo principal está saturado (error 503) la app reintenta; si sigue saturado o se quedó sin cupo (error 429), prueba en orden con `gemini-flash-lite-latest`, `gemini-2.5-flash` y `gemini-2.5-flash-lite`. Debajo de la respuesta se indica si respondió un modelo de respaldo. La lista se puede cambiar con el secret `MODELOS_DE_RESPALDO = "modelo1, modelo2"` (los nombres vigentes están en la página de modelos de Gemini).
 - **Error 403 "Your project has been denied access" / proyecto "Restringido":** suele pasar con cuentas institucionales (por ejemplo, `@iudpt.edu.ar`). Creá la clave de Gemini con una cuenta personal de Gmail y reemplazala en los Secrets.
 - **Error de límite (429):** el plan gratuito limita pedidos por minuto y por día. Esperá y reintentá.
@@ -138,4 +149,5 @@ Sin las variables de GitHub, los documentos se guardan en la carpeta `almacen_do
 - En el plan gratuito de la API, Google puede usar los datos enviados para mejorar sus modelos: no subas documentos con datos personales.
 - La búsqueda web (Grounding with Google Search) tiene su propio cupo gratuito, más chico que el de las consultas normales. Revisá el límite vigente en la página de precios de Gemini.
 - Los links que devuelve Google Search a veces pasan por una dirección intermedia de Google (`vertexaisearch...`) que redirige a la página real: al hacer clic se abre el sitio original.
-- La detección de "no está en los documentos" depende de que el modelo use la etiqueta `[SIN_INFORMACION]`; si alguna vez no la usa, no aparecen los botones. Es un buen caso para documentar en las pruebas.
+- La clasificación (médica, fuera de tema, sin información) la hace el modelo siguiendo el prompt: si alguna vez no pone la etiqueta, la respuesta se muestra como texto normal y no aparecen los botones. Es un buen caso para documentar en las pruebas.
+- Si un guardado en segundo plano falla (por ejemplo, GitHub no responde), la app lo avisa en la siguiente interacción y se reintenta con la próxima pregunta.

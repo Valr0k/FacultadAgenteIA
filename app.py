@@ -11,6 +11,7 @@ y cita archivo y ubicación de cada dato.
 Ejecutar localmente:  streamlit run app.py
 """
 
+import copy
 import hmac
 import os
 import time
@@ -22,7 +23,7 @@ from google.genai import types
 
 from almacen import (CARPETA_POR_FORMATO, ICONO_POR_FORMATO, ErrorDeAlmacen, crear_almacen,
                      limpiar_nombre)
-from conversaciones import GestorDeConversaciones, fecha_legible
+from conversaciones import ERRORES_DE_GUARDADO, GestorDeConversaciones, fecha_legible
 from documentos import (EXTENSIONES_SOPORTADAS, Buscador, armar_contexto, leer_documento,
                         lectura_a_diccionario, lectura_desde_diccionario)
 
@@ -36,7 +37,20 @@ CARPETA = Path(__file__).parent
 RUTA_PROMPT_DOCUMENTOS = CARPETA / "prompt_sistema.txt"
 RUTA_PROMPT_WEB = CARPETA / "prompt_web.txt"
 CARPETA_ALMACEN_LOCAL = CARPETA / "almacen_documentos"
-MARCADOR_SIN_INFORMACION = "[SIN_INFORMACION]"
+# Etiquetas con las que el modelo indica cómo clasificó la consulta (ver prompt_sistema.txt)
+ETIQUETAS = {
+    "[SIN_INFORMACION]": "sin_informacion",   # del tema, pero no está en los documentos -> se ofrece la web
+    "[FUERA_DE_TEMA]": "fuera_de_tema",       # no tiene que ver con los documentos -> no se responde
+    "[CONSULTA_MEDICA]": "medica",            # consejo de salud personal -> se deriva a un médico
+}
+RECOMENDACION_MEDICA = (
+    "Te recomiendo consultar con un médico o profesional de la salud, que puede evaluar tu caso "
+    "en particular. Si se trata de una urgencia, comunicate con el servicio de emergencias de tu "
+    "zona (en Argentina, 107 o 911)."
+)
+# Cuánto "piensa" el modelo antes de responder: poco = más rápido
+NIVEL_DE_RAZONAMIENTO = "low"
+MODELOS_SIN_AJUSTE_DE_RAZONAMIENTO: set[str] = set()   # se completa sola si un modelo rechaza el ajuste
 
 PAGINA_CONSULTAS = "💬 Consultas"
 PAGINA_REPOSITORIO = "📚 Repositorio de documentos"
@@ -159,7 +173,8 @@ def construir_buscador(claves: tuple, _documentos: list):
         todos_los_fragmentos.extend(fragmentos)
         avisos.extend(f"{documento.nombre}: {aviso}" for aviso in avisos_documento)
     buscador = Buscador(todos_los_fragmentos) if todos_los_fragmentos else None
-    return buscador, avisos
+    temas = buscador.temas_por_documento() if buscador else {}
+    return buscador, avisos, temas
 
 
 # =====================================================================
@@ -212,39 +227,75 @@ def lista_de_modelos(principal: str) -> list[str]:
     return modelos
 
 
-def generar_con_respaldo(cliente, modelo_principal: str, contenidos, configuracion):
+def con_razonamiento_bajo(configuracion: types.GenerateContentConfig) -> types.GenerateContentConfig:
+    """Los modelos Flash actuales "piensan" antes de responder, y eso suma
+    segundos. Para buscar en fragmentos ya elegidos alcanza con poco razonamiento."""
+    return configuracion.model_copy(update={
+        "thinking_config": types.ThinkingConfig(thinking_level=NIVEL_DE_RAZONAMIENTO)})
+
+
+def _textos_del_flujo(primero, resto):
+    """Devuelve de a pedazos el texto que va llegando del modelo."""
+    for pedazo in ([primero] if primero is not None else []):
+        if getattr(pedazo, "text", None):
+            yield pedazo.text
+    for pedazo in resto:
+        if getattr(pedazo, "text", None):
+            yield pedazo.text
+
+
+def generar_con_respaldo(cliente, modelo_principal: str, contenidos, configuracion,
+                         en_vivo: bool = False):
     """Llama a Gemini y, si el modelo está saturado o sin cupo, reintenta y
     prueba con los modelos de respaldo. Devuelve (respuesta, modelo_usado).
+    Con en_vivo=True la respuesta es un generador de texto (streaming).
     Los errores que no se arreglan cambiando de modelo (clave inválida,
     pedido mal armado) se informan enseguida."""
     ultimo_error = None
     for modelo in lista_de_modelos(modelo_principal):
-        for intento in range(1, INTENTOS_POR_MODELO + 1):
+        config = configuracion if modelo in MODELOS_SIN_AJUSTE_DE_RAZONAMIENTO else con_razonamiento_bajo(configuracion)
+        intento = 1
+        while intento <= INTENTOS_POR_MODELO:
             try:
-                respuesta = cliente.models.generate_content(
-                    model=modelo, contents=contenidos, config=configuracion)
-                return respuesta, modelo
+                if en_vivo:
+                    flujo = iter(cliente.models.generate_content_stream(
+                        model=modelo, contents=contenidos, config=config))
+                    primero = next(flujo, None)   # los errores de conexión aparecen acá
+                    return _textos_del_flujo(primero, flujo), modelo
+                return cliente.models.generate_content(model=modelo, contents=contenidos, config=config), modelo
             except Exception as error:
                 ultimo_error = error
                 texto = str(error)
+                if config.thinking_config is not None and "thinking" in texto.lower():
+                    # Este modelo no acepta ese ajuste: se usa sin él y se recuerda para la próxima
+                    MODELOS_SIN_AJUSTE_DE_RAZONAMIENTO.add(modelo)
+                    config = configuracion
+                    continue
                 if any(codigo in texto for codigo in ERRORES_DEL_MODELO):
                     break   # este modelo no va a responder: probar el siguiente
                 if not any(codigo in texto for codigo in ERRORES_TEMPORALES):
                     raise   # otro problema (por ejemplo, la clave): no tiene sentido seguir
                 if intento < INTENTOS_POR_MODELO:
                     time.sleep(ESPERA_ENTRE_INTENTOS * intento)
+                intento += 1
     raise ultimo_error
 
 
+def describir_temas(temas: dict[str, list[str]]) -> str:
+    return "\n".join(f"- {archivo}: {', '.join(palabras)}" for archivo, palabras in temas.items())
+
+
 def preguntar_a_documentos(clave: str, modelo: str, historial: list[dict],
-                           pregunta: str, contexto: str,
-                           nombres_documentos: list[str]) -> tuple[str, str]:
-    """Consulta a Gemini SIN herramientas: solo puede usar los fragmentos recibidos."""
+                           pregunta: str, contexto: str, temas: dict[str, list[str]]):
+    """Consulta a Gemini SIN herramientas: solo puede usar los fragmentos recibidos.
+    Devuelve (generador de texto, modelo usado): la respuesta se muestra a
+    medida que llega, en lugar de esperar a que esté completa."""
     cliente = genai.Client(api_key=clave)
     contenidos = historial_para_gemini(historial)
 
     mensaje_actual = (
-        f"DOCUMENTOS CARGADOS: {', '.join(nombres_documentos)}\n\n"
+        "DOCUMENTOS CARGADOS Y SUS TEMAS PRINCIPALES (para decidir si la consulta es del tema):\n"
+        f"{describir_temas(temas)}\n\n"
         "FRAGMENTOS DE LOS DOCUMENTOS (única fuente permitida):\n\n"
         f"{contexto}\n\n"
         "-----\n"
@@ -256,9 +307,23 @@ def preguntar_a_documentos(clave: str, modelo: str, historial: list[dict],
         system_instruction=cargar_prompt(RUTA_PROMPT_DOCUMENTOS),
         temperature=0.2,   # baja: prioriza precisión sobre creatividad
     )
-    respuesta, modelo_usado = generar_con_respaldo(cliente, modelo, contenidos, configuracion)
-    texto = respuesta.text or "No pude generar una respuesta. Probá reformular la pregunta."
-    return texto, modelo_usado
+    return generar_con_respaldo(cliente, modelo, contenidos, configuracion, en_vivo=True)
+
+
+def separar_etiqueta(texto: str) -> tuple[str | None, str]:
+    """Busca la etiqueta de clasificación que pone el modelo ([SIN_INFORMACION],
+    [FUERA_DE_TEMA] o [CONSULTA_MEDICA]). Devuelve (clase, texto sin la etiqueta)."""
+    for etiqueta, clase in ETIQUETAS.items():
+        if etiqueta in texto:
+            return clase, texto.replace(etiqueta, "").strip()
+    return None, texto
+
+
+def podria_ser_etiqueta(texto: str) -> bool:
+    """Mientras llega la respuesta: si empieza con "[" todavía no se sabe si es
+    una etiqueta, así que no se muestra hasta tener los primeros caracteres."""
+    inicio = texto.lstrip()
+    return inicio.startswith("[") and "]" not in inicio and len(inicio) < 25
 
 
 def extraer_fuentes_web(respuesta) -> list[dict]:
@@ -278,12 +343,13 @@ def extraer_fuentes_web(respuesta) -> list[dict]:
 
 
 def buscar_en_web(clave: str, modelo: str, pregunta: str,
-                  nombres_documentos: list[str]) -> tuple[str, list[dict], str]:
+                  temas: dict[str, list[str]]) -> tuple[str, list[dict], str]:
     """Consulta a Gemini CON la herramienta de Google Search.
     Solo se llama cuando el usuario autorizó la búsqueda con el botón."""
     cliente = genai.Client(api_key=clave)
     mensaje = (
-        f"Tema de referencia (documentos del usuario): {', '.join(nombres_documentos)}\n"
+        "DOCUMENTOS DEL USUARIO Y SUS TEMAS (la búsqueda debe ser sobre estos temas):\n"
+        f"{describir_temas(temas)}\n\n"
         f"PREGUNTA DEL USUARIO: {pregunta}"
     )
     configuracion = types.GenerateContentConfig(
@@ -299,9 +365,16 @@ def buscar_en_web(clave: str, modelo: str, pregunta: str,
 def mostrar_mensaje(mensaje: dict):
     """Dibuja un mensaje del historial con sus fragmentos o links."""
     with st.chat_message("user" if mensaje["rol"] == "usuario" else "assistant"):
-        if mensaje.get("tipo") == "aviso":
+        tipo = mensaje.get("tipo")
+        if tipo == "aviso":                     # del tema, pero sin información
             st.warning(mensaje["texto"], icon="⚠️")
-        elif mensaje.get("tipo") == "web":
+        elif tipo == "error":
+            st.error(mensaje["texto"], icon="⚠️")
+        elif tipo == "fuera_de_tema":
+            st.info(mensaje["texto"], icon="🚫")
+        elif tipo == "medica":
+            st.info(f"{mensaje['texto']}\n\n**{RECOMENDACION_MEDICA}**", icon="🩺")
+        elif tipo == "web":
             st.info("Respuesta obtenida de la web, no de tus documentos.", icon="🌐")
             st.markdown(mensaje["texto"])
         else:
@@ -323,6 +396,8 @@ def mostrar_mensaje(mensaje: dict):
         if mensaje.get("modelo_respaldo"):
             st.caption(f"ℹ️ El modelo principal no estaba disponible (saturado o sin cupo); respondió el modelo de "
                        f"respaldo «{mensaje['modelo_respaldo']}».")
+        if mensaje.get("segundos") is not None:
+            st.caption(f"⏱️ {mensaje['segundos']:.1f} s".replace(".", ","))
 
 
 # =====================================================================
@@ -331,6 +406,8 @@ def mostrar_mensaje(mensaje: dict):
 valores_iniciales = {
     "historial": [],
     "conversacion_id": None,          # None = conversación nueva, todavía no guardada
+    "conversacion_creada": None,      # fecha de creación de la conversación abierta
+    "conversaciones_locales": {},     # conversaciones guardadas en esta sesión (copia rápida)
     "indice_conversaciones": None,    # lista de conversaciones guardadas (se carga una vez)
     "aviso_conversacion": None,
     "pregunta_pendiente_web": None,   # pregunta no encontrada, esperando la decisión del usuario
@@ -374,41 +451,51 @@ def conversaciones_guardadas(forzar: bool = False) -> list[dict]:
 
 
 def guardar_conversacion_actual():
-    """Se llama después de cada respuesta. Si falla (por ejemplo, GitHub no
-    responde), se avisa pero el chat sigue funcionando."""
+    """Se llama después de cada respuesta. Los datos se arman al instante y la
+    escritura en GitHub (lo que demora) se hace en segundo plano, así el
+    usuario no espera. Si falla, se avisa en la próxima interacción."""
     if not any(m["rol"] == "usuario" for m in st.session_state.historial):
         return
-    try:
-        st.session_state.conversacion_id = gestor_conversaciones.guardar(
-            st.session_state.conversacion_id,
-            st.session_state.historial,
-            st.session_state.pregunta_pendiente_web,
-        )
-        conversaciones_guardadas(forzar=True)
-    except Exception as error:
-        st.session_state.aviso_conversacion = f"No se pudo guardar la conversación: {error}"
+    datos, entrada = gestor_conversaciones.preparar(
+        st.session_state.conversacion_id,
+        copy.deepcopy(st.session_state.historial),
+        st.session_state.pregunta_pendiente_web,
+        st.session_state.conversacion_creada,
+    )
+    st.session_state.conversacion_id = datos["id"]
+    st.session_state.conversacion_creada = datos["creada"]
+    # Copia local: permite reabrirla aunque el guardado en GitHub todavía no terminó
+    st.session_state.conversaciones_locales[datos["id"]] = datos
+    # La lista de la barra lateral se actualiza enseguida, sin consultar GitHub
+    lista = [c for c in conversaciones_guardadas() if c.get("id") != datos["id"]]
+    st.session_state.indice_conversaciones = [entrada] + lista
+    gestor_conversaciones.guardar_en_segundo_plano(datos, entrada)
 
 
 def nueva_conversacion():
     st.session_state.historial = []
     st.session_state.conversacion_id = None
+    st.session_state.conversacion_creada = None
     st.session_state.pregunta_pendiente_web = None
     st.session_state.pagina = PAGINA_CONSULTAS
 
 
 def abrir_conversacion(id_conversacion: str):
-    try:
-        datos = gestor_conversaciones.cargar(id_conversacion)
-    except Exception as error:
-        datos, st.session_state.aviso_conversacion = None, f"No se pudo abrir la conversación: {error}"
+    datos = st.session_state.conversaciones_locales.get(id_conversacion)
+    if datos is None:
+        try:
+            datos = gestor_conversaciones.cargar(id_conversacion)
+        except Exception as error:
+            datos, st.session_state.aviso_conversacion = None, f"No se pudo abrir la conversación: {error}"
     if not datos:
         st.session_state.aviso_conversacion = (st.session_state.aviso_conversacion
                                                or "La conversación ya no existe.")
         conversaciones_guardadas(forzar=True)
         return
-    st.session_state.historial = datos.get("historial", [])
+    st.session_state.historial = copy.deepcopy(datos.get("historial", []))
     st.session_state.pregunta_pendiente_web = datos.get("pendiente_web")
     st.session_state.conversacion_id = id_conversacion
+    st.session_state.conversacion_creada = datos.get("creada")
     st.session_state.pagina = PAGINA_CONSULTAS
 
 
@@ -419,6 +506,7 @@ def borrar_conversacion(id_conversacion: str):
         gestor_conversaciones.borrar(id_conversacion)
     except Exception as error:
         st.session_state.aviso_conversacion = f"No se pudo borrar la conversación: {error}"
+    st.session_state.conversaciones_locales.pop(id_conversacion, None)
     if st.session_state.conversacion_id == id_conversacion:
         nueva_conversacion()
     conversaciones_guardadas(forzar=True)
@@ -663,7 +751,7 @@ def pagina_consultas():
     claves = tuple((d.ruta, d.version) for d in documentos_activos)
     with st.spinner("Preparando documentos... (si hay documentos nuevos con páginas escaneadas, "
                     "la primera vez puede tardar algunos minutos)"):
-        buscador, avisos = construir_buscador(claves, documentos_activos)
+        buscador, avisos, temas = construir_buscador(claves, documentos_activos)
     nombres_documentos = [d.nombre for d in documentos_activos]
 
     if avisos:
@@ -680,6 +768,10 @@ def pagina_consultas():
     if st.session_state.aviso_conversacion:
         st.warning(st.session_state.aviso_conversacion)
         st.session_state.aviso_conversacion = None
+    error_guardado = ERRORES_DE_GUARDADO.get(st.session_state.conversacion_id or "")
+    if error_guardado:
+        st.warning(f"La última respuesta no se pudo guardar en el repositorio: {error_guardado}. "
+                   "Se va a reintentar con la próxima pregunta.")
     actual = next((c for c in conversaciones_guardadas()
                    if c["id"] == st.session_state.conversacion_id), None)
     if actual:
@@ -708,16 +800,21 @@ def pagina_consultas():
         no_buscar = columna_no.button("✋ No, gracias", use_container_width=True)
 
         if buscar:
+            inicio = time.time()
             with st.spinner("Buscando en la web..."):
                 try:
-                    texto, fuentes, modelo_usado = buscar_en_web(clave_api, modelo, pendiente,
-                                                                 nombres_documentos)
-                    st.session_state.historial.append(
-                        {"rol": "asistente", "tipo": "web", "texto": texto, "fuentes_web": fuentes,
-                         "modelo_respaldo": modelo_usado if modelo_usado != modelo else None})
+                    texto, fuentes, modelo_usado = buscar_en_web(clave_api, modelo, pendiente, temas)
+                    clase, texto = separar_etiqueta(texto)
+                    respuesta = {"rol": "asistente", "texto": texto,
+                                 "modelo_respaldo": modelo_usado if modelo_usado != modelo else None}
+                    if clase in ("medica", "fuera_de_tema"):
+                        respuesta["tipo"] = clase   # el módulo web también se niega en estos casos
+                    else:
+                        respuesta.update({"tipo": "web", "fuentes_web": fuentes})
                 except Exception as error:
-                    st.session_state.historial.append(
-                        {"rol": "asistente", "tipo": "aviso", "texto": describir_error(error)})
+                    respuesta = {"rol": "asistente", "tipo": "error", "texto": describir_error(error)}
+            respuesta["segundos"] = time.time() - inicio
+            st.session_state.historial.append(respuesta)
             st.session_state.pregunta_pendiente_web = None
             guardar_conversacion_actual()
             st.rerun()
@@ -747,25 +844,42 @@ def pagina_consultas():
     resultados = buscador.buscar(consulta, cantidad_fragmentos)
     contexto = armar_contexto(resultados)
 
-    with st.spinner("Buscando en los documentos..."):
+    # La respuesta se muestra a medida que llega (streaming), en vez de esperar a que esté completa.
+    # Si empieza con una etiqueta ([FUERA_DE_TEMA], [CONSULTA_MEDICA], [SIN_INFORMACION]) no se
+    # muestra el texto crudo: se espera al final para dibujarla con su formato.
+    inicio = time.time()
+    texto, modelo_usado, hubo_error = "", modelo, False
+    with st.chat_message("assistant"):
+        zona = st.empty()
+        zona.caption("Buscando en los documentos…")
         try:
-            texto, modelo_usado = preguntar_a_documentos(clave_api, modelo, st.session_state.historial,
-                                                         pregunta, contexto, nombres_documentos)
-            hubo_error = False
+            pedazos, modelo_usado = preguntar_a_documentos(
+                clave_api, modelo, st.session_state.historial, pregunta, contexto, temas)
+            for pedazo in pedazos:
+                texto += pedazo
+                if podria_ser_etiqueta(texto) or separar_etiqueta(texto)[0]:
+                    continue
+                zona.markdown(texto + " ▌")
+            if not texto.strip():
+                texto = "No pude generar una respuesta. Probá reformular la pregunta."
         except Exception as error:
-            texto, modelo_usado, hubo_error = describir_error(error), modelo, True
+            texto, hubo_error = describir_error(error), True
 
-    respuesta = {"rol": "asistente", "texto": texto,
+    respuesta = {"rol": "asistente", "texto": texto, "segundos": time.time() - inicio,
                  "modelo_respaldo": modelo_usado if modelo_usado != modelo else None}
+    clase, texto_limpio = separar_etiqueta(texto)
 
     if hubo_error:
-        respuesta["tipo"] = "aviso"
-    elif MARCADOR_SIN_INFORMACION in texto:
-        # La información no está en los documentos: se avisa y se ofrecen los botones
-        detalle = texto.replace(MARCADOR_SIN_INFORMACION, "").strip()
-        respuesta["tipo"] = "aviso"
-        respuesta["texto"] = detalle or "No encontré esa información en tus documentos."
+        respuesta["tipo"] = "error"
+    elif clase == "sin_informacion":
+        # Del tema pero no está en los documentos: se avisa y se ofrecen los botones
+        respuesta.update(tipo="aviso", texto=texto_limpio or "No encontré esa información en tus documentos.")
         st.session_state.pregunta_pendiente_web = pregunta
+    elif clase == "fuera_de_tema":
+        respuesta.update(tipo="fuera_de_tema", texto=texto_limpio or
+                         "Esa consulta está fuera del tema de los documentos cargados, por lo que no puedo responderla.")
+    elif clase == "medica":
+        respuesta.update(tipo="medica", texto=texto_limpio or "No puedo darte consejos médicos.")
     elif resultados:
         respuesta["fragmentos"] = [
             {"cita": f.cita(), "puntaje": p,
@@ -775,8 +889,7 @@ def pagina_consultas():
 
     st.session_state.historial.append({"rol": "usuario", "texto": pregunta})
     st.session_state.historial.append(respuesta)
-    with st.spinner("Guardando la conversación..."):
-        guardar_conversacion_actual()
+    guardar_conversacion_actual()   # en segundo plano: no hace esperar
     st.rerun()
 
 

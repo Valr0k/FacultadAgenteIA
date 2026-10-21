@@ -293,6 +293,14 @@ class AlmacenGitHub:
             datos["sha"] = sha
         # Tiempo de espera generoso: un archivo grande puede tardar en subir
         respuesta = self.sesion.put(self._url(ruta), json=datos, timeout=600)
+        if respuesta.status_code in (409, 422):
+            # Otro guardado cambió el archivo justo antes: se toma la versión nueva y se reintenta
+            sha = self._sha_actual(ruta)
+            if sha:
+                datos["sha"] = sha
+            else:
+                datos.pop("sha", None)
+            respuesta = self.sesion.put(self._url(ruta), json=datos, timeout=600)
         self._revisar(respuesta, f"guardar {descripcion}")
         return sha is not None
 

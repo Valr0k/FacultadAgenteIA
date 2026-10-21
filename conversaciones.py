@@ -11,8 +11,14 @@ El índice existe para poder mostrar la lista sin abrir cada conversación.
 """
 
 import re
+import threading
 import uuid
 from datetime import datetime, timedelta, timezone
+
+# Los guardados se hacen en segundo plano; el candado evita que dos se mezclen.
+_CANDADO_DE_ESCRITURA = threading.Lock()
+# id de conversación -> mensaje de error, si un guardado en segundo plano falló
+ERRORES_DE_GUARDADO: dict[str, str] = {}
 
 CARPETA_CONVERSACIONES = "_conversaciones"
 RUTA_INDICE = f"{CARPETA_CONVERSACIONES}/indice.json"
@@ -65,46 +71,60 @@ class GestorDeConversaciones:
     def cargar(self, id_conversacion: str) -> dict | None:
         return self.almacen.leer_json(self._ruta(id_conversacion))
 
-    def guardar(self, id_conversacion: str | None, historial: list[dict],
-                pendiente_web: str | None = None) -> str:
-        """Guarda los mensajes. Si la conversación es nueva, le crea un id.
-        Devuelve el id."""
-        es_nueva = id_conversacion is None
-        if es_nueva:
-            id_conversacion = uuid.uuid4().hex
-
+    @staticmethod
+    def preparar(id_conversacion: str | None, historial: list[dict],
+                 pendiente_web: str | None = None, creada: str | None = None) -> tuple[dict, dict]:
+        """Arma los datos a guardar SIN conectarse a nada (es instantáneo).
+        Devuelve (conversación completa, entrada para el índice)."""
+        id_conversacion = id_conversacion or uuid.uuid4().hex
         primera_pregunta = next((m["texto"] for m in historial if m["rol"] == "usuario"), "")
         titulo = titulo_desde(primera_pregunta)
-        cantidad_preguntas = sum(1 for m in historial if m["rol"] == "usuario")
         momento = ahora()
+        creada = creada or momento
+        datos = {
+            "id": id_conversacion, "titulo": titulo, "creada": creada, "actualizada": momento,
+            "historial": historial, "pendiente_web": pendiente_web,
+        }
+        entrada = {
+            "id": id_conversacion, "titulo": titulo, "creada": creada, "actualizada": momento,
+            "preguntas": sum(1 for m in historial if m["rol"] == "usuario"),
+        }
+        return datos, entrada
 
-        anterior = None if es_nueva else self.cargar(id_conversacion)
-        creada = (anterior or {}).get("creada", momento)
+    def escribir(self, datos: dict, entrada: dict):
+        """Escribe la conversación y actualiza el índice (es lo que demora:
+        varias llamadas a GitHub). Se protege con un candado para que dos
+        guardados seguidos no se pisen."""
+        with _CANDADO_DE_ESCRITURA:
+            self.almacen.escribir_json(self._ruta(datos["id"]), datos, f"conversación «{datos['titulo']}»")
+            # El índice se vuelve a leer justo antes de escribirlo, por si otra persona
+            # guardó una conversación mientras tanto
+            conversaciones = [c for c in self.listar() if c.get("id") != datos["id"]]
+            conversaciones.append(entrada)
+            self.almacen.escribir_json(RUTA_INDICE, {"conversaciones": conversaciones},
+                                       "índice de conversaciones")
 
-        self.almacen.escribir_json(self._ruta(id_conversacion), {
-            "id": id_conversacion,
-            "titulo": titulo,
-            "creada": creada,
-            "actualizada": momento,
-            "historial": historial,
-            "pendiente_web": pendiente_web,
-        }, f"conversación «{titulo}»")
+    def guardar_en_segundo_plano(self, datos: dict, entrada: dict):
+        """Guarda sin hacer esperar al usuario. Si falla, deja el error anotado
+        para mostrarlo en la próxima interacción."""
+        def tarea():
+            try:
+                self.escribir(datos, entrada)
+                ERRORES_DE_GUARDADO.pop(datos["id"], None)
+            except Exception as error:
+                ERRORES_DE_GUARDADO[datos["id"]] = str(error)
+        threading.Thread(target=tarea, daemon=True).start()
 
-        # Actualiza el índice (se reemplaza la entrada de esta conversación)
-        conversaciones = [c for c in self.listar() if c.get("id") != id_conversacion]
-        conversaciones.append({
-            "id": id_conversacion,
-            "titulo": titulo,
-            "creada": creada,
-            "actualizada": momento,
-            "preguntas": cantidad_preguntas,
-        })
-        self.almacen.escribir_json(RUTA_INDICE, {"conversaciones": conversaciones},
-                                   "índice de conversaciones")
-        return id_conversacion
+    def guardar(self, id_conversacion: str | None, historial: list[dict],
+                pendiente_web: str | None = None, creada: str | None = None) -> str:
+        """Versión que espera a terminar (se usa en pruebas). Devuelve el id."""
+        datos, entrada = self.preparar(id_conversacion, historial, pendiente_web, creada)
+        self.escribir(datos, entrada)
+        return datos["id"]
 
     def borrar(self, id_conversacion: str):
-        conversaciones = [c for c in self.listar() if c.get("id") != id_conversacion]
-        self.almacen.escribir_json(RUTA_INDICE, {"conversaciones": conversaciones},
-                                   "índice de conversaciones")
-        self.almacen.eliminar_json(self._ruta(id_conversacion), "conversación")
+        with _CANDADO_DE_ESCRITURA:
+            conversaciones = [c for c in self.listar() if c.get("id") != id_conversacion]
+            self.almacen.escribir_json(RUTA_INDICE, {"conversaciones": conversaciones},
+                                       "índice de conversaciones")
+            self.almacen.eliminar_json(self._ruta(id_conversacion), "conversación")
