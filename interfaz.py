@@ -52,9 +52,9 @@ code, pre, .dg-mono {{ font-family: 'JetBrains Mono', ui-monospace, monospace !i
 [data-testid="stHeader"] {{ background: transparent; }}
 h1, h2, h3 {{ letter-spacing: -0.015em; }}
 
-/* ---- Barra lateral ---- */
-[data-testid="stSidebar"] {{ background: {FONDO_LATERAL}; border-right: 1px solid {BORDE_SUAVE}; }}
-[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p {{ color: {TEXTO_SECUNDARIO}; }}
+/* ---- Sin barra lateral ni encabezado de Streamlit: la navegación va en la barra superior ---- */
+[data-testid="stSidebar"], [data-testid="stSidebarCollapsedControl"], [data-testid="stHeader"] {{ display: none !important; }}
+.block-container, [data-testid="stMainBlockContainer"] {{ padding-top: 0.75rem !important; }}
 
 /* ---- Botones ---- */
 button[kind="primary"], [data-testid="stBaseButton-primary"] {{
@@ -101,14 +101,49 @@ button[kind="tertiary"], [data-testid="stBaseButton-tertiary"] {{ color: {MENTA}
 /* ---- Panel de fuentes: queda fijo mientras se lee la conversación ---- */
 @media (min-width: 900px) {{
   [data-testid="stColumn"]:has(.st-key-dg_panel) {{
-    position: sticky; top: 4rem; align-self: flex-start;
-    max-height: calc(100vh - 9rem); overflow-y: auto; }}
+    position: sticky; top: 5.5rem; align-self: flex-start;
+    max-height: calc(100vh - 10.5rem); overflow-y: auto; }}
 }}
 
-/* ---- Barra lateral: la consulta abierta, resaltada sin gritar ---- */
-[data-testid="stSidebar"] button[kind="primary"], [data-testid="stSidebar"] [data-testid="stBaseButton-primary"] {{
+/* ---- Barra superior ---- */
+.st-key-dg_barra {{
+  position: sticky; top: 0.5rem; z-index: 990;
+  background: {FONDO_LATERAL}; border: 1px solid {BORDE_SUAVE}; border-radius: 14px;
+  padding: 8px 12px; margin-bottom: 0.9rem; }}
+.st-key-dg_barra .dg-logo {{ margin: 0 10px 0 2px; }}
+.st-key-dg_barra .dg-logo span {{ font-size: 1.15rem; }}
+.st-key-dg_barra [data-testid="stMarkdownContainer"] {{ margin-bottom: 0; }}
+.st-key-dg_barra button {{ border-color: transparent !important; }}
+.st-key-dg_barra button:hover {{ border-color: {BORDE} !important; }}
+/* Sección en la que estás: resaltada sin gritar */
+.st-key-dg_barra button[kind="primary"], .st-key-dg_barra [data-testid="stBaseButton-primary"],
+[data-testid="stPopoverBody"] button[kind="primary"], [data-testid="stPopoverBody"] [data-testid="stBaseButton-primary"] {{
   background: {MENTA_OSCURO} !important; color: {MENTA} !important; border: 1px solid {MENTA_BORDE} !important; }}
-[data-testid="stSidebar"] button[kind="primary"] p, [data-testid="stSidebar"] [data-testid="stBaseButton-primary"] p {{ color: {MENTA} !important; }}
+.st-key-dg_barra button[kind="primary"] p, .st-key-dg_barra [data-testid="stBaseButton-primary"] p,
+.st-key-dg_barra [data-testid="stBaseButton-primary"] [data-testid="stIconMaterial"],
+[data-testid="stPopoverBody"] button[kind="primary"] p, [data-testid="stPopoverBody"] [data-testid="stBaseButton-primary"] p {{
+  color: {MENTA} !important; }}
+/* Formulario de ingreso: el botón Ingresar sí va lleno */
+[data-testid="stPopoverBody"] [data-testid="stBaseButton-primaryFormSubmit"] {{
+  background: {MENTA} !important; color: {TINTA_SOBRE_MENTA} !important; border: none !important; }}
+[data-testid="stPopoverBody"] [data-testid="stBaseButton-primaryFormSubmit"] p {{ color: {TINTA_SOBRE_MENTA} !important; }}
+/* Menús desplegables */
+[data-testid="stPopoverBody"] {{ background: {SUPERFICIE} !important; border: 1px solid {BORDE} !important;
+  border-radius: 14px !important; min-width: 300px; max-width: 380px; }}
+[data-testid="stPopoverBody"] button p {{ white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
+[data-testid="stPopoverBody"] [data-testid="stTextInputRootElement"] {{
+  background: {FONDO} !important; border: 1px solid {BORDE} !important; border-radius: 10px !important; }}
+[data-testid="stPopoverBody"] [data-testid="stTextInputRootElement"]:focus-within {{ border-color: {MENTA} !important; }}
+.dg-menu-doc {{ margin: 0; font-size: 0.85rem; color: {TEXTO_SECUNDARIO}; padding: 2px 0 2px 10px; border-left: 2px solid {MENTA_BORDE};
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
+.dg-menu-doc.dg-inactivo {{ color: {TEXTO_TENUE}; border-left-color: {BORDE_SUAVE}; text-decoration: line-through; }}
+@media (max-width: 640px) {{
+  .st-key-dg_barra .dg-logo span {{ display: none; }}
+  /* En el celular la barra muestra solo los íconos de cada menú */
+  .st-key-dg_barra button [data-testid="stMarkdownContainer"] {{ display: none; }}
+  .st-key-dg_barra {{ flex-wrap: nowrap !important; padding: 6px 8px; }}
+  [data-testid="stPopoverBody"] {{ min-width: 260px; }}
+}}
 
 /* ---- Piezas propias ---- */
 .dg-logo {{ display: flex; align-items: center; gap: 10px; margin: 0 0 0.5rem; }}

@@ -5,9 +5,10 @@ Asistente de IA que responde preguntas con los documentos guardados en su reposi
 ## Secciones de la app
 
 - **💬 Consultas:** el chat. Usa todos los documentos guardados que estén marcados como "Usar en consultas".
-- **🗂️ Conversaciones guardadas:** cada conversación se guarda sola después de cada respuesta. Desde la barra lateral se puede empezar una **➕ Nueva conversación** o abrir una anterior y seguirla donde quedó (el asistente recuerda lo que se habló en ella). El título es la primera pregunta. Solo el administrador puede borrar conversaciones.
+- **🗂️ Conversaciones guardadas:** cada conversación se guarda sola después de cada respuesta. Desde el menú **Conversaciones** de la barra superior se puede empezar una **Nueva consulta** o abrir una anterior y seguirla donde quedó (el asistente recuerda lo que se habló en ella). El título es la primera pregunta. Solo el administrador puede borrar conversaciones.
 - **📚 Repositorio de documentos:** para ver, descargar y activar/desactivar documentos. Muestra un resumen y una pestaña por formato (PDF, Word, PowerPoint, Texto).
-- **🔐 Administrador:** **subir y borrar** documentos requiere ingresar con usuario y contraseña desde la barra lateral. Consultar y descargar es libre.
+- **🧭 Barra superior:** tres menús desplegables: **Conversaciones** (nueva consulta y las guardadas), **Documentos** (los documentos guardados por formato y el acceso al repositorio) y **Administrador** (ingreso, opciones avanzadas y cierre de sesión). Cada menú se cierra solo al elegir una opción.
+- **🔐 Administrador:** **subir y borrar** documentos requiere ingresar con usuario y contraseña desde el menú **Administrador** (arriba a la derecha). Consultar y descargar es libre.
 
 ## Diseño: «Laboratorio digital»
 
@@ -138,7 +139,7 @@ Sin las variables de GitHub, los documentos se guardan en la carpeta `almacen_do
 
 ## Ajustes útiles
 
-- **Modelo:** por defecto usa `gemini-flash-lite-latest`, el más rápido. Si da error de modelo, cambialo en *Opciones avanzadas* (barra lateral) por uno que figure como gratuito en la página de precios de Gemini.
+- **Modelo:** por defecto usa `gemini-flash-lite-latest`, el más rápido. Si da error de modelo, cambialo en el menú **Administrador** (con la sesión iniciada) por uno que figure como gratuito en la página de precios de Gemini.
 - **Fragmentos por consulta:** más fragmentos = más contexto, pero más consumo. Con 8 suele alcanzar.
 - **Velocidad:** la respuesta se muestra a medida que el modelo la escribe (streaming); se le pide al modelo un nivel de razonamiento bajo (`thinking_level = low`), porque para responder con fragmentos ya elegidos no hace falta más; y la conversación se guarda en GitHub en segundo plano, sin hacer esperar. Si un modelo no empieza a responder en 20 s, se pasa al siguiente sin volver a esperarlo. Debajo de cada respuesta se muestra cuánto tardó (⏱️), cuándo apareció el primer texto, qué modelo respondió y qué intentos fallaron.
 - **Modelos de respaldo:** si el modelo principal está saturado (error 503) la app reintenta; si sigue saturado o se quedó sin cupo (error 429), prueba en orden con `gemini-flash-latest`, `gemini-2.5-flash-lite` y `gemini-2.5-flash`. Debajo de la respuesta se indica si respondió un modelo de respaldo. La lista se puede cambiar con el secret `MODELOS_DE_RESPALDO = "modelo1, modelo2"` (los nombres vigentes están en la página de modelos de Gemini).

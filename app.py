@@ -13,6 +13,7 @@ Ejecutar localmente:  streamlit run app.py
 
 import copy
 import hmac
+import html
 import json
 import os
 import re
@@ -668,7 +669,7 @@ def guardar_conversacion_actual():
     st.session_state.conversacion_creada = datos["creada"]
     # Copia local: permite reabrirla aunque el guardado en GitHub todavía no terminó
     st.session_state.conversaciones_locales[datos["id"]] = datos
-    # La lista de la barra lateral se actualiza enseguida, sin consultar GitHub
+    # La lista del menú Conversaciones se actualiza enseguida, sin consultar GitHub
     lista = [c for c in conversaciones_guardadas() if c.get("id") != datos["id"]]
     st.session_state.indice_conversaciones = [entrada] + lista
     gestor_conversaciones.guardar_en_segundo_plano(datos, entrada)
@@ -718,77 +719,145 @@ documentos = documentos_guardados()
 documentos_activos = [d for d in documentos if d.ruta not in st.session_state.inactivos]
 
 # =====================================================================
-# Barra lateral
+# Barra superior: tres menús desplegables (Conversaciones, Documentos, Administrador)
 # =====================================================================
-with st.sidebar:
-    mostrar_logo()
-    pagina = st.radio("Ir a", [PAGINA_CONSULTAS, PAGINA_REPOSITORIO], key="pagina",
-                      label_visibility="collapsed")
+MENUS = ("menu_conversaciones", "menu_documentos", "menu_admin")
+for clave, valor in {"ajuste_modelo": MODELO_POR_DEFECTO, "ajuste_fragmentos": 8, "error_admin": None}.items():
+    if clave not in st.session_state:
+        st.session_state[clave] = valor
 
-    # ---------- Conversaciones ----------
-    st.divider()
-    st.button("Nueva consulta", icon=":material/add:", on_click=nueva_conversacion, use_container_width=True,
-              type="primary" if st.session_state.conversacion_id is None else "secondary")
-    lista_conversaciones = conversaciones_guardadas()
-    if lista_conversaciones:
-        st.markdown('<span class="dg-dato">// consultas guardadas</span>', unsafe_allow_html=True)
-        with st.container(height=min(60 + 52 * len(lista_conversaciones), 330), border=False):
-            for conversacion in lista_conversaciones:
-                es_la_actual = conversacion["id"] == st.session_state.conversacion_id
-                st.button(
-                    conversacion.get("titulo", "Sin título"),
-                    key=f"conv_{conversacion['id']}",
-                    on_click=abrir_conversacion, args=(conversacion["id"],),
-                    type="primary" if es_la_actual else "secondary",
-                    use_container_width=True,
-                    help=f"{fecha_legible(conversacion.get('actualizada'))} · "
-                         f"{conversacion.get('preguntas', 0)} pregunta(s)",
-                )
+
+def cerrar_menus():
+    """Cierra los desplegables después de elegir una opción (solo desde callbacks)."""
+    for menu in MENUS:
+        st.session_state[menu] = False
+
+
+def elegir_conversacion(id_conversacion: str | None):
+    if id_conversacion is None:
+        nueva_conversacion()
     else:
-        st.caption("Todavía no hay conversaciones guardadas.")
+        abrir_conversacion(id_conversacion)
+    cerrar_menus()
 
-    st.divider()
-    st.markdown(f"**Documentos guardados:** {len(documentos)}")
-    for formato in CARPETA_POR_FORMATO:
-        cantidad = sum(1 for d in documentos if d.formato == formato)
-        if cantidad:
-            st.caption(f"{ICONO_POR_FORMATO[formato]} {formato}: {cantidad}")
+
+def ir_a(pagina_destino: str):
+    st.session_state.pagina = pagina_destino
+    cerrar_menus()
+
+
+def ingresar_admin():
+    usuario = st.session_state.get("admin_usuario", "")
+    clave = st.session_state.get("admin_clave", "")
+    if validar_admin(usuario, clave):
+        st.session_state.es_admin = True
+        st.session_state.intentos_fallidos = 0
+        st.session_state.error_admin = None
+        cerrar_menus()
+    else:
+        st.session_state.intentos_fallidos += 1
+        # Cada intento fallido tarda un poco más, para frenar a quien pruebe contraseñas
+        time.sleep(min(st.session_state.intentos_fallidos, 5))
+        st.session_state.error_admin = "Usuario o contraseña incorrectos."
+    st.session_state.admin_clave = ""
+
+
+def cerrar_sesion_admin():
+    st.session_state.es_admin = False
+    cerrar_menus()
+
+
+def guardar_ajuste(destino: str, origen: str):
+    st.session_state[destino] = st.session_state[origen]
+
+
+def menu_conversaciones():
+    if st.session_state.pagina != PAGINA_CONSULTAS and st.session_state.historial:
+        st.button("Volver a la consulta abierta", icon=":material/arrow_back:", width="stretch",
+                  on_click=ir_a, args=(PAGINA_CONSULTAS,))
+    st.button("Nueva consulta", icon=":material/add:", width="stretch",
+              on_click=elegir_conversacion, args=(None,),
+              type="primary" if st.session_state.conversacion_id is None else "secondary")
+    lista = conversaciones_guardadas()
+    if not lista:
+        st.caption("Todavía no hay conversaciones guardadas.")
+        return
+    st.markdown('<span class="dg-dato">// consultas guardadas</span>', unsafe_allow_html=True)
+    with st.container(height=340 if len(lista) > 6 else "content", border=False):
+        for conversacion in lista:
+            es_la_actual = conversacion["id"] == st.session_state.conversacion_id
+            st.button(
+                conversacion.get("titulo", "Sin título"),
+                key=f"conv_{conversacion['id']}",
+                on_click=elegir_conversacion, args=(conversacion["id"],),
+                type="primary" if es_la_actual else "secondary",
+                width="stretch",
+                help=f"{fecha_legible(conversacion.get('actualizada'))} · "
+                     f"{conversacion.get('preguntas', 0)} pregunta(s)",
+            )
+
+
+def menu_documentos():
+    st.markdown(f"**{len(documentos)} documento(s) guardados**")
     if len(documentos_activos) != len(documentos):
         st.caption(f"Se consultan {len(documentos_activos)} de {len(documentos)}.")
+    with st.container(height=320 if len(documentos) > 8 else "content", border=False):
+        for formato in CARPETA_POR_FORMATO:
+            del_formato = [d for d in documentos if d.formato == formato]
+            if not del_formato:
+                continue
+            st.markdown(f'<span class="dg-dato">// {html.escape(formato)} · {len(del_formato)}</span>',
+                        unsafe_allow_html=True)
+            for documento in del_formato:
+                inactivo = documento.ruta in st.session_state.inactivos
+                st.markdown(f'<div class="dg-menu-doc{" dg-inactivo" if inactivo else ""}" '
+                            f'title="{html.escape(documento.nombre)}">{html.escape(documento.nombre)}</div>',
+                            unsafe_allow_html=True)
+        if not documentos:
+            st.caption("Todavía no hay documentos.")
+    st.button("Abrir el repositorio", icon=":material/folder_open:", width="stretch",
+              type="primary", on_click=ir_a, args=(PAGINA_REPOSITORIO,))
 
-    # ---------- Acceso de administrador ----------
-    st.divider()
+
+def menu_administrador():
     if st.session_state.es_admin:
-        st.success("Sesión de administrador", icon=":material/lock_open:")
-        if st.button("Cerrar sesión"):
-            st.session_state.es_admin = False
-            st.rerun()
-    else:
-        with st.expander("Ingresar como administrador", icon=":material/lock:"):
-            if not all(credenciales_admin()):
-                st.caption("El acceso de administrador no está configurado (ver README).")
-            else:
-                with st.form("ingreso_admin", clear_on_submit=True):
-                    usuario = st.text_input("Usuario")
-                    clave = st.text_input("Contraseña", type="password")
-                    ingresar = st.form_submit_button("Ingresar")
-                if ingresar:
-                    if validar_admin(usuario, clave):
-                        st.session_state.es_admin = True
-                        st.session_state.intentos_fallidos = 0
-                        st.rerun()
-                    else:
-                        st.session_state.intentos_fallidos += 1
-                        # Cada intento fallido tarda un poco más, para frenar a quien pruebe contraseñas
-                        time.sleep(min(st.session_state.intentos_fallidos, 5))
-                        st.error("Usuario o contraseña incorrectos.")
+        st.markdown('<span class="dg-dato">sesión de administrador activa</span>', unsafe_allow_html=True)
+        st.caption("Podés subir y borrar documentos, y borrar conversaciones.")
+        st.text_input("Modelo de Gemini", value=st.session_state.ajuste_modelo, key="w_modelo",
+                      on_change=guardar_ajuste, args=("ajuste_modelo", "w_modelo"))
+        st.slider("Fragmentos por consulta", 3, 15, value=st.session_state.ajuste_fragmentos,
+                  key="w_fragmentos", on_change=guardar_ajuste, args=("ajuste_fragmentos", "w_fragmentos"))
+        st.button("Cerrar sesión", icon=":material/logout:", width="stretch", on_click=cerrar_sesion_admin)
+        return
+    if not all(credenciales_admin()):
+        st.caption("El acceso de administrador no está configurado (ver README).")
+        return
+    with st.form("ingreso_admin", border=False):
+        st.text_input("Usuario", key="admin_usuario")
+        st.text_input("Contraseña", type="password", key="admin_clave")
+        st.form_submit_button("Ingresar", type="primary", width="stretch", on_click=ingresar_admin)
+    if st.session_state.error_admin:
+        st.error(st.session_state.error_admin)
+        st.session_state.error_admin = None
 
-    with st.expander("Opciones avanzadas", icon=":material/tune:"):
-        modelo = st.text_input("Modelo de Gemini", value=MODELO_POR_DEFECTO)
-        cantidad_fragmentos = st.slider("Fragmentos por consulta", 3, 15, 8)
 
-    st.caption("DocuGuía es un sistema de inteligencia artificial. Puede cometer "
-               "errores: verificá siempre las ubicaciones y los links citados.")
+pagina = st.session_state.pagina
+with st.container(key="dg_barra", horizontal=True, vertical_alignment="center", gap="small"):
+    mostrar_logo()
+    with st.popover("Conversaciones", icon=":material/forum:", key="menu_conversaciones",
+                    on_change="rerun", type="primary" if pagina == PAGINA_CONSULTAS else "secondary"):
+        menu_conversaciones()
+    with st.popover(f"Documentos · {len(documentos)}", icon=":material/folder_open:", key="menu_documentos",
+                    on_change="rerun", type="primary" if pagina == PAGINA_REPOSITORIO else "secondary"):
+        menu_documentos()
+    st.space("stretch")
+    with st.popover("Admin" if st.session_state.es_admin else "Administrador",
+                    icon=":material/lock_open:" if st.session_state.es_admin else ":material/lock:",
+                    key="menu_admin", on_change="rerun"):
+        menu_administrador()
+
+modelo = st.session_state.ajuste_modelo
+cantidad_fragmentos = st.session_state.ajuste_fragmentos
 
 if st.session_state.get("error_almacen"):
     st.error(f"Problema con el repositorio de documentos: {st.session_state.error_almacen}")
@@ -815,11 +884,13 @@ def pagina_repositorio():
     # ---------- Subir documentos (solo administrador) ----------
     if not st.session_state.es_admin:
         st.info("Para subir o borrar documentos, ingresá como administrador "
-                "desde la barra lateral.", icon=":material/lock:")
+                "desde el menú Administrador (arriba a la derecha).", icon=":material/lock:")
     else:
         mostrar_subida()
 
     mostrar_listado()
+    st.markdown('<p class="dg-nota">DocuGuía es un sistema de inteligencia artificial. Puede cometer '
+                'errores: verificá siempre las ubicaciones y los links citados.</p>', unsafe_allow_html=True)
 
 
 def mostrar_subida():
@@ -1001,7 +1072,7 @@ def pagina_consultas():
         elif not st.session_state.historial:
             st.markdown('<p class="dg-nota">Preguntá sobre tus documentos: cada dato de la respuesta '
                         'lleva un número que remite a su fuente, en el panel de la derecha. '
-                        'La conversación se guarda sola y la podés retomar desde la barra lateral.</p>',
+                        'La conversación se guarda sola y la podés retomar desde el menú Conversaciones.</p>',
                         unsafe_allow_html=True)
 
         if st.session_state.aviso_conversacion:
