@@ -1,0 +1,31 @@
+[theme]
+# Identidad "Laboratorio digital" de DocuGuía (ver interfaz.py y el Design System)
+base = "dark"
+primaryColor = "#6FE3C1"
+backgroundColor = "#0F1B1E"
+secondaryBackgroundColor = "#142427"
+textColor = "#E6F1EE"
+# Las tipografías van dentro de la app (carpeta static/), así no dependen de Google Fonts
+font = "Space Grotesk, sans-serif"
+codeFont = "JetBrains Mono, monospace"
+
+[[theme.fontFaces]]
+family = "Space Grotesk"
+url = "app/static/space-grotesk.woff2"
+weight = "300 700"
+style = "normal"
+
+[[theme.fontFaces]]
+family = "JetBrains Mono"
+url = "app/static/jetbrains-mono.woff2"
+weight = "100 800"
+style = "normal"
+
+[theme.sidebar]
+backgroundColor = "#0B1517"
+
+[server]
+enableStaticServing = true
+
+[client]
+toolbarMode = "minimal"
