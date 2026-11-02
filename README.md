@@ -9,6 +9,13 @@ Asistente de IA que responde preguntas con los documentos guardados en su reposi
 - **📚 Repositorio de documentos:** para ver, descargar y activar/desactivar documentos. Muestra un resumen y una pestaña por formato (PDF, Word, PowerPoint, Texto).
 - **🔐 Administrador:** **subir y borrar** documentos requiere ingresar con usuario y contraseña desde la barra lateral. Consultar y descargar es libre.
 
+## Diseño: «Laboratorio digital»
+
+- Tema oscuro verde petróleo con acento menta (acciones y citas) y naranja (avisos). Tipografías Space Grotesk (texto) y JetBrains Mono (datos verificables: páginas, tiempos, citas).
+- **Panel de fuentes:** las citas del texto se muestran como números [1], [2]… que remiten a tarjetas en el panel de la derecha, con archivo, ubicación, fragmento citado, relevancia y descarga. El panel queda fijo mientras se lee; cada respuesta tiene un botón «Ver fuentes».
+- Dónde está: `.streamlit/config.toml` (tema y tipografías), `interfaz.py` (estilos, logo, avatar, citas y panel) y `static/` (archivos de las tipografías, con licencia SIL Open Font License, servidos por la app para no depender de Google Fonts).
+- La identidad completa (colores con notas de uso y contraste, tipografía, piezas, logo) está guardada en el Design System «DocuGuía».
+
 ## Formatos soportados y cómo se citan
 
 | Formato | Cómo se cita | Ejemplo |
@@ -60,6 +67,9 @@ Los formatos viejos `.doc` y `.ppt` no se pueden leer: hay que abrirlos y guarda
 | `app.py` | Interfaz (Streamlit): páginas de Consultas y Repositorio, llamadas a Gemini |
 | `almacen.py` | Guardado de documentos en GitHub (o en una carpeta local para pruebas) |
 | `conversaciones.py` | Guardado, listado y borrado de conversaciones |
+| `interfaz.py` | Identidad visual: estilos, logo, avatar, citas numeradas y panel de fuentes |
+| `.streamlit/config.toml` | Tema de colores y tipografías de Streamlit |
+| `static/` | Archivos de las tipografías (y sus licencias) |
 | `documentos.py` | Lectura de PDF, Word, PowerPoint y texto; fragmentación y búsqueda |
 | `prompt_sistema.txt` | System prompt con los 6 bloques de la guía. **Editalo para iterar**, sin tocar el código |
 | `prompt_web.txt` | Prompt que se usa solo cuando el usuario autoriza la búsqueda web |

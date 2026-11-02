@@ -38,7 +38,8 @@ CARPETA_POR_FORMATO = {
     "Texto": "texto",
 }
 
-ICONO_POR_FORMATO = {"PDF": "📕", "Word": "📘", "PowerPoint": "📙", "Texto": "📄"}
+ICONO_POR_FORMATO = {"PDF": ":material/picture_as_pdf:", "Word": ":material/description:",
+                     "PowerPoint": ":material/slideshow:", "Texto": ":material/article:"}
 
 # Límite por archivo. Se puede cambiar con el secret TAMANIO_MAXIMO_MB.
 # GitHub no acepta archivos de más de 100 MB, por eso el tope es 95 MB

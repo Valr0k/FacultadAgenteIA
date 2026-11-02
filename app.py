@@ -25,6 +25,8 @@ from google.genai import types
 
 from almacen import (CARPETA_POR_FORMATO, ICONO_POR_FORMATO, ErrorDeAlmacen, crear_almacen,
                      limpiar_nombre)
+from interfaz import (aplicar_estilo, avatar_asistente, mostrar_logo, mostrar_panel_fuentes,
+                      mostrar_titulo, preparar_respuesta)
 from conversaciones import ERRORES_DE_GUARDADO, GestorDeConversaciones, fecha_legible
 from busqueda_web import (ErrorDeBusquedaWeb, armar_contexto_web, buscar_en_todas_las_fuentes,
                           consulta_de_busqueda, fragmentos_relevantes)
@@ -58,10 +60,11 @@ NIVEL_DE_RAZONAMIENTO = "low"
 MODELOS_SIN_AJUSTE_DE_RAZONAMIENTO: set[str] = set()   # se completa sola si un modelo rechaza el ajuste
 TIEMPO_MAXIMO_DE_ESPERA_MS = 20_000   # si un modelo no contesta en 20 s, se pasa al siguiente
 
-PAGINA_CONSULTAS = "💬 Consultas"
-PAGINA_REPOSITORIO = "📚 Repositorio de documentos"
+PAGINA_CONSULTAS = ":material/forum: Consultas"
+PAGINA_REPOSITORIO = ":material/folder_open: Repositorio"
 
-st.set_page_config(page_title="DocuGuía", page_icon="📄", layout="centered")
+st.set_page_config(page_title="DocuGuía", page_icon="🧬", layout="wide")
+aplicar_estilo()
 
 
 # =====================================================================
@@ -538,59 +541,64 @@ def _seg(valor: float) -> str:
 def mostrar_tiempos(mensaje: dict):
     """Debajo de cada respuesta: cuánto tardó y, si hubo demoras, dónde."""
     tiempos = mensaje.get("tiempos") or {}
-    partes = [f"⏱️ {_seg(mensaje['segundos'])}"]
+    partes = [_seg(mensaje['segundos'])]
     if tiempos.get("primer_texto") is not None:
         partes.append(f"primer texto a los {_seg(tiempos['primer_texto'])}")
     if tiempos.get("modelo"):
         partes.append(tiempos["modelo"])
     if not tiempos.get("intentos") and mensaje.get("tipo") == "medica":
         partes.append("respondido por la app, sin consultar al modelo")
-    st.caption(" · ".join(partes))
+    st.markdown(f'<span class="dg-dato">{" · ".join(partes)}</span>', unsafe_allow_html=True)
     fallidos = [i for i in tiempos.get("intentos", []) if i["resultado"] != "ok"]
     if fallidos:
         st.caption("Intentos fallidos: " + "; ".join(
             f"{i['modelo']} — {i['resultado']} ({_seg(i['segundos'])})" for i in fallidos))
 
 
-def mostrar_mensaje(mensaje: dict):
-    """Dibuja un mensaje del historial con sus fragmentos o links."""
-    with st.chat_message("user" if mensaje["rol"] == "usuario" else "assistant"):
+def elegir_para_panel(indice: int):
+    st.session_state.respuesta_en_panel = indice
+
+
+def tiene_fuentes(mensaje: dict) -> bool:
+    return bool(mensaje.get("fragmentos") or mensaje.get("fuentes_web"))
+
+
+def mostrar_mensaje(mensaje: dict, indice: int | None = None):
+    """Dibuja un mensaje del historial. Las fuentes no van debajo de la respuesta:
+    se ven en el panel de la derecha (las citas del texto son números)."""
+    es_usuario = mensaje["rol"] == "usuario"
+    with st.chat_message("user" if es_usuario else "assistant",
+                         avatar=None if es_usuario else avatar_asistente()):
+        if es_usuario:
+            st.markdown(mensaje["texto"])
+            return
         tipo = mensaje.get("tipo")
         if tipo == "aviso":                     # del tema, pero sin información
-            st.warning(mensaje["texto"], icon="⚠️")
+            st.warning(mensaje["texto"], icon=":material/search_off:")
         elif tipo == "error":
-            st.error(mensaje["texto"], icon="⚠️")
+            st.error(mensaje["texto"], icon=":material/error:")
         elif tipo == "fuera_de_tema":
-            st.info(mensaje["texto"], icon="🚫")
+            st.info(mensaje["texto"], icon=":material/block:")
         elif tipo == "medica":
-            st.info(f"{mensaje['texto']}\n\n**{RECOMENDACION_MEDICA}**", icon="🩺")
-        elif tipo == "web":
-            st.info("Respuesta obtenida de la web, no de tus documentos.", icon="🌐")
-            st.markdown(mensaje["texto"])
+            st.info(f"{mensaje['texto']}\n\n**{RECOMENDACION_MEDICA}**", icon=":material/medical_services:")
         else:
-            st.markdown(mensaje["texto"])
-
-        if mensaje.get("fuentes_web"):
-            st.markdown("**Links consultados:**")
-            for i, fuente in enumerate(mensaje["fuentes_web"], start=1):
-                st.markdown(f"{i}. [{fuente['titulo']}]({fuente['url']})")
-        elif mensaje.get("tipo") == "web":
-            st.caption("La búsqueda no devolvió links verificables. Tomá esta respuesta con precaución.")
-        if mensaje.get("estado_fuentes"):
-            st.caption("Fuentes consultadas: " + " · ".join(
-                f"{nombre}: {estado}" for nombre, estado in mensaje["estado_fuentes"].items()))
-
-        if mensaje.get("fragmentos"):
-            with st.expander("🔎 Fragmentos consultados"):
-                for fragmento in mensaje["fragmentos"]:
-                    st.markdown(f"**{fragmento['cita']}** — relevancia {fragmento['puntaje']:.2f}")
-                    st.caption(fragmento["texto"])
+            if tipo == "web":
+                st.caption(":material/public: Respuesta con información de la web, no de tus documentos.")
+            texto_html, citadas = preparar_respuesta(mensaje["texto"], mensaje.get("fragmentos") or [])
+            st.markdown(texto_html, unsafe_allow_html=True)
 
         if mensaje.get("modelo_respaldo"):
-            st.caption(f"ℹ️ El modelo principal no estaba disponible (saturado o sin cupo); respondió el modelo de "
-                       f"respaldo «{mensaje['modelo_respaldo']}».")
-        if mensaje.get("segundos") is not None:
-            mostrar_tiempos(mensaje)
+            st.caption(f"El modelo principal no estaba disponible; respondió «{mensaje['modelo_respaldo']}».")
+        pie = st.container(horizontal=True, vertical_alignment="center", gap="small")
+        with pie:
+            if mensaje.get("segundos") is not None:
+                mostrar_tiempos(mensaje)
+            if indice is not None and tiene_fuentes(mensaje):
+                cantidad = len(mensaje.get("fuentes_web") or []) or len(
+                    preparar_respuesta(mensaje["texto"], mensaje.get("fragmentos") or [])[1]) or len(
+                    mensaje.get("fragmentos") or [])
+                st.button(f"Ver fuentes ({cantidad})", key=f"ver_fuentes_{indice}", type="tertiary",
+                          icon=":material/menu_book:", on_click=elegir_para_panel, args=(indice,))
 
 
 # =====================================================================
@@ -598,6 +606,7 @@ def mostrar_mensaje(mensaje: dict):
 # =====================================================================
 valores_iniciales = {
     "historial": [],
+    "respuesta_en_panel": None,       # índice de la respuesta cuyas fuentes muestra el panel (None = la última)
     "conversacion_id": None,          # None = conversación nueva, todavía no guardada
     "conversacion_creada": None,      # fecha de creación de la conversación abierta
     "conversaciones_locales": {},     # conversaciones guardadas en esta sesión (copia rápida)
@@ -712,17 +721,17 @@ documentos_activos = [d for d in documentos if d.ruta not in st.session_state.in
 # Barra lateral
 # =====================================================================
 with st.sidebar:
-    st.header("📄 DocuGuía")
+    mostrar_logo()
     pagina = st.radio("Ir a", [PAGINA_CONSULTAS, PAGINA_REPOSITORIO], key="pagina",
                       label_visibility="collapsed")
 
     # ---------- Conversaciones ----------
     st.divider()
-    st.button("➕ Nueva conversación", on_click=nueva_conversacion, use_container_width=True,
+    st.button("Nueva consulta", icon=":material/add:", on_click=nueva_conversacion, use_container_width=True,
               type="primary" if st.session_state.conversacion_id is None else "secondary")
     lista_conversaciones = conversaciones_guardadas()
     if lista_conversaciones:
-        st.markdown("**🗂️ Conversaciones guardadas**")
+        st.markdown('<span class="dg-dato">// consultas guardadas</span>', unsafe_allow_html=True)
         with st.container(height=min(60 + 52 * len(lista_conversaciones), 330), border=False):
             for conversacion in lista_conversaciones:
                 es_la_actual = conversacion["id"] == st.session_state.conversacion_id
@@ -750,12 +759,12 @@ with st.sidebar:
     # ---------- Acceso de administrador ----------
     st.divider()
     if st.session_state.es_admin:
-        st.success("🔓 Sesión de administrador")
+        st.success("Sesión de administrador", icon=":material/lock_open:")
         if st.button("Cerrar sesión"):
             st.session_state.es_admin = False
             st.rerun()
     else:
-        with st.expander("🔐 Ingresar como administrador"):
+        with st.expander("Ingresar como administrador", icon=":material/lock:"):
             if not all(credenciales_admin()):
                 st.caption("El acceso de administrador no está configurado (ver README).")
             else:
@@ -774,7 +783,7 @@ with st.sidebar:
                         time.sleep(min(st.session_state.intentos_fallidos, 5))
                         st.error("Usuario o contraseña incorrectos.")
 
-    with st.expander("⚙️ Opciones avanzadas"):
+    with st.expander("Opciones avanzadas", icon=":material/tune:"):
         modelo = st.text_input("Modelo de Gemini", value=MODELO_POR_DEFECTO)
         cantidad_fragmentos = st.slider("Fragmentos por consulta", 3, 15, 8)
 
@@ -789,14 +798,14 @@ if st.session_state.get("error_almacen"):
 # Página: Repositorio de documentos
 # =====================================================================
 def pagina_repositorio():
-    st.title("📚 Repositorio de documentos")
+    mostrar_titulo("Repositorio de documentos", pastilla=None)
     st.write("Los documentos que subas quedan guardados para las próximas consultas. "
              f"Se guardan en: **{almacen.descripcion()}**.")
 
     if not almacen.es_persistente_en_la_nube:
         st.info("Modo local: los documentos se guardan en una carpeta del servidor. "
                 "En Streamlit Cloud esa carpeta se borra cuando la app se reinicia. "
-                "Para que queden guardados siempre, configurá GitHub (ver README).", icon="ℹ️")
+                "Para que queden guardados siempre, configurá GitHub (ver README).", icon=":material/info:")
 
     # Mensajes del último guardado o borrado
     for tipo, texto in st.session_state.mensajes_repositorio:
@@ -806,7 +815,7 @@ def pagina_repositorio():
     # ---------- Subir documentos (solo administrador) ----------
     if not st.session_state.es_admin:
         st.info("Para subir o borrar documentos, ingresá como administrador "
-                "desde la barra lateral (🔐).", icon="🔒")
+                "desde la barra lateral.", icon=":material/lock:")
     else:
         mostrar_subida()
 
@@ -828,7 +837,7 @@ def mostrar_subida():
         st.caption("Las páginas que son imágenes (por ejemplo, presentaciones exportadas a PDF "
                    "como fotos) se leen con OCR al guardar. Puede tardar unos segundos por página, "
                    "pero se hace una sola vez.")
-        if st.button("💾 Guardar en el repositorio", type="primary", disabled=not archivos):
+        if st.button("Guardar en el repositorio", icon=":material/save:", type="primary", disabled=not archivos):
             mensajes = []
             guardados = []
             with st.spinner("Guardando..."):
@@ -894,7 +903,7 @@ def mostrar_listado():
                     )
                     try:
                         col_bajar.download_button(
-                            "⬇️", data=contenido_de(documento.ruta, documento.version, documento),
+                            "", icon=":material/download:", data=contenido_de(documento.ruta, documento.version, documento),
                             file_name=documento.nombre, key=f"bajar_{documento.ruta}",
                             help="Descargar para consulta manual",
                         )
@@ -902,7 +911,7 @@ def mostrar_listado():
                         col_bajar.caption("—")
                     if not st.session_state.es_admin:
                         continue   # solo el administrador ve el botón de borrar
-                    with col_borrar.popover("🗑️", help="Borrar del repositorio"):
+                    with col_borrar.popover("", icon=":material/delete:", help="Borrar del repositorio"):
                         st.write(f"¿Borrar **{documento.nombre}**? No se puede deshacer.")
                         if st.button("Sí, borrar", key=f"borrar_{documento.ruta}", type="primary"):
                             if not st.session_state.es_admin:   # doble control por seguridad
@@ -918,7 +927,7 @@ def mostrar_listado():
                             st.rerun()
 
     if documentos:
-        if st.button("🔄 Actualizar lista"):
+        if st.button("Actualizar lista", icon=":material/refresh:"):
             documentos_guardados(forzar=True)
             st.rerun()
 
@@ -926,190 +935,228 @@ def mostrar_listado():
 # =====================================================================
 # Página: Consultas (chat)
 # =====================================================================
-def pagina_consultas():
-    st.title("💬 DocuGuía")
-    st.write("Asistente de IA que responde con tus documentos guardados (PDF, Word, "
-             "PowerPoint o texto) y cita archivo y ubicación. Solo busca en la web si vos lo autorizás.")
+def boton_de_descarga(nombre_archivo: str, clave: str):
+    """Botón para descargar, desde el panel, el documento de una fuente."""
+    documento = next((d for d in documentos_activos if d.nombre == nombre_archivo), None)
+    if documento is None:
+        return
+    try:
+        datos = contenido_de(documento.ruta, documento.version, documento)
+    except Exception:
+        return
+    st.download_button("Descargar documento", data=datos, file_name=documento.nombre,
+                       key=f"bajar_panel_{clave}", type="tertiary", icon=":material/download:")
 
+
+def mensaje_para_panel() -> dict | None:
+    """La respuesta elegida con "Ver fuentes", o la última que tenga fuentes."""
+    historial = st.session_state.historial
+    elegido = st.session_state.respuesta_en_panel
+    if elegido is not None and 0 <= elegido < len(historial):
+        return dict(historial[elegido], _indice=elegido)
+    for indice in range(len(historial) - 1, -1, -1):
+        if historial[indice]["rol"] == "asistente" and tiene_fuentes(historial[indice]):
+            return dict(historial[indice], _indice=indice)
+    return None
+
+
+def pagina_consultas():
     clave_api = obtener_secreto("GEMINI_API_KEY")
     if not clave_api:
         st.error("Falta configurar la clave GEMINI_API_KEY (ver README).")
         st.stop()
 
-    if not documentos_activos:
-        st.info("Todavía no hay documentos para consultar. Subilos en el repositorio.", icon="📚")
-        st.button("Ir al repositorio", on_click=ir_al_repositorio)
-        return
-
-    claves = tuple((d.ruta, d.version) for d in documentos_activos)
-    with st.spinner("Preparando documentos... (si hay documentos nuevos con páginas escaneadas, "
-                    "la primera vez puede tardar algunos minutos)"):
-        buscador, avisos, temas = construir_buscador(claves, documentos_activos)
-    nombres_documentos = [d.nombre for d in documentos_activos]
-
-    if avisos:
-        with st.expander(f"⚠️ Avisos de lectura ({len(avisos)})"):
-            for aviso in avisos:
-                st.caption(aviso)
-    if buscador is None:
-        st.warning("Los documentos activos no tienen texto legible.")
-        return
-
-    st.caption(f"Consultando {len(nombres_documentos)} documento(s): {', '.join(nombres_documentos)}")
-
-    # ---------- Encabezado de la conversación ----------
-    if st.session_state.aviso_conversacion:
-        st.warning(st.session_state.aviso_conversacion)
-        st.session_state.aviso_conversacion = None
-    error_guardado = ERRORES_DE_GUARDADO.get(st.session_state.conversacion_id or "")
-    if error_guardado:
-        st.warning(f"La última respuesta no se pudo guardar en el repositorio: {error_guardado}. "
-                   "Se va a reintentar con la próxima pregunta.")
     actual = next((c for c in conversaciones_guardadas()
                    if c["id"] == st.session_state.conversacion_id), None)
-    if actual:
-        columna_titulo, columna_borrar = st.columns([6, 1])
-        columna_titulo.subheader(f"🗂️ {actual.get('titulo', 'Conversación')}")
-        columna_titulo.caption(f"Creada {fecha_legible(actual.get('creada'))} · "
-                               f"última actividad {fecha_legible(actual.get('actualizada'))}")
-        if st.session_state.es_admin:
-            with columna_borrar.popover("🗑️", help="Borrar esta conversación"):
-                st.write("¿Borrar esta conversación? No se puede deshacer.")
-                st.button("Sí, borrar", key="borrar_conversacion", type="primary",
-                          on_click=borrar_conversacion, args=(actual["id"],))
-    elif not st.session_state.historial:
-        st.caption("💡 Nueva conversación: se guarda automáticamente después de la primera "
-                   "respuesta y la podés retomar desde la barra lateral.")
+    columna_chat, columna_fuentes = st.columns([2.5, 1], gap="large")
 
-    for mensaje in st.session_state.historial:
-        mostrar_mensaje(mensaje)
+    with columna_chat:
+        encabezado = st.container(horizontal=True, vertical_alignment="center")
+        with encabezado:
+            mostrar_titulo(actual.get("titulo", "Consulta") if actual else "Nueva consulta")
+            if actual and st.session_state.es_admin:
+                with st.popover("", icon=":material/delete:", help="Borrar esta conversación"):
+                    st.write("¿Borrar esta conversación? No se puede deshacer.")
+                    st.button("Sí, borrar", key="borrar_conversacion", type="primary",
+                              on_click=borrar_conversacion, args=(actual["id"],))
 
-    # ---------- Botones: ¿buscar en la web? ----------
-    pendiente = st.session_state.pregunta_pendiente_web
-    if pendiente:
-        st.markdown("**¿Querés que busque esta información en la web?**")
-        columna_si, columna_no = st.columns(2)
-        buscar = columna_si.button("🌐 Sí, buscar en la web", type="primary", use_container_width=True)
-        no_buscar = columna_no.button("✋ No, gracias", use_container_width=True)
+        if not documentos_activos:
+            st.info("Todavía no hay documentos para consultar. Subilos en el repositorio.",
+                    icon=":material/folder_open:")
+            st.button("Ir al repositorio", on_click=ir_al_repositorio, type="primary")
+            return
 
-        if buscar:
-            inicio, registro = time.time(), []
-            with st.spinner("Buscando en la web..."):
-                try:
-                    texto, fuentes, modelo_usado, estado_fuentes = buscar_en_web(
-                        clave_api, modelo, pendiente, temas, registro)
-                    clase, texto = separar_etiqueta(texto)
-                    respuesta = {"rol": "asistente", "texto": texto,
-                                 "modelo_respaldo": modelo_usado if modelo_usado != modelo else None}
-                    if clase in ("medica", "fuera_de_tema"):
-                        respuesta["tipo"] = clase   # el módulo web también se niega en estos casos
-                    else:
-                        respuesta.update({"tipo": "web", "fuentes_web": fuentes,
-                                          "estado_fuentes": estado_fuentes})
-                except Exception as error:
-                    respuesta = {"rol": "asistente", "tipo": "error", "texto": describir_error(error)}
-            respuesta["segundos"] = time.time() - inicio
-            respuesta["tiempos"] = {"modelo": respuesta.get("modelo_respaldo") or (modelo if registro else None),
-                                    "intentos": registro}
-            st.session_state.historial.append(respuesta)
-            st.session_state.pregunta_pendiente_web = None
-            guardar_conversacion_actual()
-            st.rerun()
+        claves = tuple((d.ruta, d.version) for d in documentos_activos)
+        with st.spinner("Preparando documentos... (si hay documentos nuevos con páginas escaneadas, "
+                        "la primera vez puede tardar algunos minutos)"):
+            buscador, avisos, temas = construir_buscador(claves, documentos_activos)
+        if buscador is None:
+            st.warning("Los documentos activos no tienen texto legible.")
+            return
 
-        if no_buscar:
-            st.session_state.historial.append({
-                "rol": "asistente",
-                "texto": "Entendido, no voy a buscar en la web. Podés hacerme otra pregunta "
-                         "sobre tus documentos.",
-            })
-            st.session_state.pregunta_pendiente_web = None
-            guardar_conversacion_actual()
-            st.rerun()
+        if actual:
+            st.markdown(f'<span class="dg-dato">creada {fecha_legible(actual.get("creada"))} · '
+                        f'última actividad {fecha_legible(actual.get("actualizada"))}</span>',
+                        unsafe_allow_html=True)
+        elif not st.session_state.historial:
+            st.markdown('<p class="dg-nota">Preguntá sobre tus documentos: cada dato de la respuesta '
+                        'lleva un número que remite a su fuente, en el panel de la derecha. '
+                        'La conversación se guarda sola y la podés retomar desde la barra lateral.</p>',
+                        unsafe_allow_html=True)
 
-    # ---------- Nueva pregunta ----------
-    pregunta = st.chat_input("Escribí tu pregunta sobre los documentos")
+        if st.session_state.aviso_conversacion:
+            st.warning(st.session_state.aviso_conversacion)
+            st.session_state.aviso_conversacion = None
+        error_guardado = ERRORES_DE_GUARDADO.get(st.session_state.conversacion_id or "")
+        if error_guardado:
+            st.warning(f"La última respuesta no se pudo guardar en el repositorio: {error_guardado}. "
+                       "Se va a reintentar con la próxima pregunta.")
+
+        for indice, mensaje in enumerate(st.session_state.historial):
+            mostrar_mensaje(mensaje, indice)
+
+        # ---------- Botones: ¿buscar en la web? ----------
+        pendiente = st.session_state.pregunta_pendiente_web
+        if pendiente:
+            st.markdown("**¿Querés que lo busque en fuentes abiertas de la web?**")
+            botones = st.container(horizontal=True, gap="small")
+            buscar = botones.button("Buscar en la web", type="primary", icon=":material/travel_explore:")
+            no_buscar = botones.button("No, gracias")
+
+            if buscar:
+                inicio, registro = time.time(), []
+                with st.spinner("Buscando en la web..."):
+                    try:
+                        texto, fuentes, modelo_usado, estado_fuentes = buscar_en_web(
+                            clave_api, modelo, pendiente, temas, registro)
+                        clase, texto = separar_etiqueta(texto)
+                        respuesta = {"rol": "asistente", "texto": texto,
+                                     "modelo_respaldo": modelo_usado if modelo_usado != modelo else None}
+                        if clase in ("medica", "fuera_de_tema"):
+                            respuesta["tipo"] = clase   # el módulo web también se niega en estos casos
+                        else:
+                            respuesta.update({"tipo": "web", "fuentes_web": fuentes,
+                                              "estado_fuentes": estado_fuentes})
+                    except Exception as error:
+                        respuesta = {"rol": "asistente", "tipo": "error", "texto": describir_error(error)}
+                respuesta["segundos"] = time.time() - inicio
+                respuesta["tiempos"] = {"modelo": respuesta.get("modelo_respaldo") or (modelo if registro else None),
+                                        "intentos": registro}
+                st.session_state.historial.append(respuesta)
+                st.session_state.respuesta_en_panel = None
+                st.session_state.pregunta_pendiente_web = None
+                guardar_conversacion_actual()
+                st.rerun()
+
+            if no_buscar:
+                st.session_state.historial.append({
+                    "rol": "asistente",
+                    "texto": "Entendido, no voy a buscar en la web. Podés hacerme otra pregunta "
+                             "sobre tus documentos.",
+                })
+                st.session_state.pregunta_pendiente_web = None
+                guardar_conversacion_actual()
+                st.rerun()
+
+
+    # ---------- Panel de fuentes ----------
+    with columna_fuentes, st.container(key="dg_panel"):
+        mostrar_panel_fuentes(mensaje_para_panel(), al_descargar=boton_de_descarga)
+        st.markdown('<p class="dg-nota" style="margin-top: 1rem;">' + f"{len(documentos_activos)} documento(s) "
+                    "activos · soy una IA: verificá siempre las fuentes.</p>", unsafe_allow_html=True)
+        if avisos:
+            with st.expander(f"Avisos de lectura ({len(avisos)})", icon=":material/info:"):
+                for aviso in avisos:
+                    st.caption(aviso)
+
+    # ---------- Nueva pregunta (la barra queda fija abajo) ----------
+    pregunta = st.chat_input("Preguntá sobre tus documentos")
     if not pregunta:
         return
 
-    # Si había una búsqueda web sin responder y el usuario pregunta otra cosa, se descarta
-    st.session_state.pregunta_pendiente_web = None
-    mostrar_mensaje({"rol": "usuario", "texto": pregunta})
+    with columna_chat:
+        # Si había una búsqueda web sin responder y el usuario pregunta otra cosa, se descarta
+        st.session_state.pregunta_pendiente_web = None
+        mostrar_mensaje({"rol": "usuario", "texto": pregunta})
 
-    # Se suma la pregunta anterior para que funcionen los "¿y eso qué significa?"
-    preguntas_previas = [m["texto"] for m in st.session_state.historial if m["rol"] == "usuario"]
-    consulta = " ".join(preguntas_previas[-1:] + [pregunta])
-    resultados = buscador.buscar(consulta, cantidad_fragmentos)
-    contexto = armar_contexto(resultados)
+        # Se suma la pregunta anterior para que funcionen los "¿y eso qué significa?"
+        preguntas_previas = [m["texto"] for m in st.session_state.historial if m["rol"] == "usuario"]
+        consulta = " ".join(preguntas_previas[-1:] + [pregunta])
+        resultados = buscador.buscar(consulta, cantidad_fragmentos)
+        contexto = armar_contexto(resultados)
 
-    # La respuesta se muestra a medida que llega (streaming), en vez de esperar a que esté completa.
-    # Si empieza con una etiqueta ([FUERA_DE_TEMA], [CONSULTA_MEDICA], [SIN_INFORMACION]) no se
-    # muestra el texto crudo: se espera al final para dibujarla con su formato.
-    inicio = time.time()
-    texto, modelo_usado, hubo_error = "", modelo, False
-    registro, primer_texto = [], None   # para el detalle de tiempos
-    if es_consulta_medica_personal(pregunta):
-        # Control propio de la app: no hace falta consultar al modelo
-        texto = "[CONSULTA_MEDICA] Entiendo tu consulta, pero no puedo darte consejos médicos."
-    else:
-        with st.chat_message("assistant"):
-            zona = st.empty()
-            zona.caption("Buscando en los documentos…")
-            for en_vivo in (True, False):   # si el streaming falla antes de recibir texto, plan B sin streaming
-                try:
-                    pedazos, modelo_usado = preguntar_a_documentos(
-                        clave_api, modelo, st.session_state.historial, pregunta, contexto, temas,
-                        en_vivo=en_vivo, registro=registro)
-                    for pedazo in pedazos:
-                        if primer_texto is None and pedazo.strip():
-                            primer_texto = time.time() - inicio
-                        texto += pedazo
-                        if podria_ser_etiqueta(texto) or separar_etiqueta(texto)[0]:
-                            continue
-                        zona.markdown(texto + " ▌")
-                    hubo_error = False
-                    break
-                except Exception as error:
-                    hubo_error = True
-                    if texto.strip():   # ya había llegado parte de la respuesta: se conserva
-                        texto += "\n\n*(La respuesta se cortó por un problema de conexión.)*"
+        # La respuesta se muestra a medida que llega (streaming), en vez de esperar a que esté completa.
+        # Si empieza con una etiqueta ([FUERA_DE_TEMA], [CONSULTA_MEDICA], [SIN_INFORMACION]) no se
+        # muestra el texto crudo: se espera al final para dibujarla con su formato.
+        inicio = time.time()
+        texto, modelo_usado, hubo_error = "", modelo, False
+        registro, primer_texto = [], None   # para el detalle de tiempos
+        if es_consulta_medica_personal(pregunta):
+            # Control propio de la app: no hace falta consultar al modelo
+            texto = "[CONSULTA_MEDICA] Entiendo tu consulta, pero no puedo darte consejos médicos."
+        else:
+            with st.chat_message("assistant", avatar=avatar_asistente()):
+                zona = st.empty()
+                zona.caption("Buscando en los documentos…")
+                for en_vivo in (True, False):   # si el streaming falla antes de recibir texto, plan B sin streaming
+                    try:
+                        pedazos, modelo_usado = preguntar_a_documentos(
+                            clave_api, modelo, st.session_state.historial, pregunta, contexto, temas,
+                            en_vivo=en_vivo, registro=registro)
+                        for pedazo in pedazos:
+                            if primer_texto is None and pedazo.strip():
+                                primer_texto = time.time() - inicio
+                            texto += pedazo
+                            if podria_ser_etiqueta(texto) or separar_etiqueta(texto)[0]:
+                                continue
+                            zona.markdown(texto + " ▌")
                         hubo_error = False
                         break
-                    texto = describir_error(error)
-                    if not en_vivo or not any(c in str(error) for c in ERRORES_DE_CONEXION):
-                        break   # el plan B solo sirve si falló la conexión del streaming
-                    texto = ""
-                    zona.caption("Reintentando…")
-            if not hubo_error and not texto.strip():
-                texto = "No pude generar una respuesta. Probá reformular la pregunta."
+                    except Exception as error:
+                        hubo_error = True
+                        if texto.strip():   # ya había llegado parte de la respuesta: se conserva
+                            texto += "\n\n*(La respuesta se cortó por un problema de conexión.)*"
+                            hubo_error = False
+                            break
+                        texto = describir_error(error)
+                        if not en_vivo or not any(c in str(error) for c in ERRORES_DE_CONEXION):
+                            break   # el plan B solo sirve si falló la conexión del streaming
+                        texto = ""
+                        zona.caption("Reintentando…")
+                if not hubo_error and not texto.strip():
+                    texto = "No pude generar una respuesta. Probá reformular la pregunta."
 
-    respuesta = {"rol": "asistente", "texto": texto, "segundos": time.time() - inicio,
-                 "modelo_respaldo": modelo_usado if modelo_usado != modelo else None,
-                 "tiempos": {"primer_texto": primer_texto, "modelo": None if not registro else modelo_usado,
-                             "intentos": registro}}
-    clase, texto_limpio = separar_etiqueta(texto)
+        respuesta = {"rol": "asistente", "texto": texto, "segundos": time.time() - inicio,
+                     "modelo_respaldo": modelo_usado if modelo_usado != modelo else None,
+                     "tiempos": {"primer_texto": primer_texto, "modelo": None if not registro else modelo_usado,
+                                 "intentos": registro}}
+        clase, texto_limpio = separar_etiqueta(texto)
 
-    if hubo_error:
-        respuesta["tipo"] = "error"
-    elif clase == "sin_informacion":
-        # Del tema pero no está en los documentos: se avisa y se ofrecen los botones
-        respuesta.update(tipo="aviso", texto=texto_limpio or "No encontré esa información en tus documentos.")
-        st.session_state.pregunta_pendiente_web = pregunta
-    elif clase == "fuera_de_tema":
-        respuesta.update(tipo="fuera_de_tema", texto=texto_limpio or
-                         "Esa consulta está fuera del tema de los documentos cargados, por lo que no puedo responderla.")
-    elif clase == "medica":
-        respuesta.update(tipo="medica", texto=texto_limpio or "No puedo darte consejos médicos.")
-    elif resultados:
-        respuesta["fragmentos"] = [
-            {"cita": f.cita(), "puntaje": p,
-             "texto": f.texto[:400] + ("..." if len(f.texto) > 400 else "")}
-            for f, p in resultados
-        ]
+        if hubo_error:
+            respuesta["tipo"] = "error"
+        elif clase == "sin_informacion":
+            # Del tema pero no está en los documentos: se avisa y se ofrecen los botones
+            respuesta.update(tipo="aviso", texto=texto_limpio or "No encontré esa información en tus documentos.")
+            st.session_state.pregunta_pendiente_web = pregunta
+        elif clase == "fuera_de_tema":
+            respuesta.update(tipo="fuera_de_tema", texto=texto_limpio or
+                             "Esa consulta está fuera del tema de los documentos cargados, por lo que no puedo responderla.")
+        elif clase == "medica":
+            respuesta.update(tipo="medica", texto=texto_limpio or "No puedo darte consejos médicos.")
+        elif resultados:
+            respuesta["fragmentos"] = [
+                {"cita": f.cita(), "archivo": f.archivo, "ubicacion": f.ubicacion, "puntaje": p,
+                 "texto": f.texto[:400] + ("..." if len(f.texto) > 400 else "")}
+                for f, p in resultados
+            ]
 
-    st.session_state.historial.append({"rol": "usuario", "texto": pregunta})
-    st.session_state.historial.append(respuesta)
-    guardar_conversacion_actual()   # en segundo plano: no hace esperar
-    st.rerun()
+        st.session_state.historial.append({"rol": "usuario", "texto": pregunta})
+        st.session_state.historial.append(respuesta)
+        st.session_state.respuesta_en_panel = None   # el panel muestra la respuesta nueva
+        guardar_conversacion_actual()   # en segundo plano: no hace esperar
+        st.rerun()
+
+
 
 
 if pagina == PAGINA_REPOSITORIO:
